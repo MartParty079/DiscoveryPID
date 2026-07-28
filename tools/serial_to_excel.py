@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-"""Log DiscoveryPID serial telemetry to Excel and CSV on the connected PC.
+"""Log DiscoveryPID telemetry to Excel and CSV files.
 
-The Arduino Mega cannot directly create an Excel workbook on the computer.
-This script runs on the connected Windows PC, reads the Mega's USB serial
-output, and saves every telemetry row into:
+The workbook contains:
+  1. Telemetry  - the complete serial data table.
+  2. JMP Data   - only P, I, and target-minus-output error.
+  3. Summary    - run-level statistics and charts.
+  4. Metadata   - setup and file information.
 
-  data/logs/DiscoveryPID_YYYYMMDD_HHMMSS.xlsx
-  data/logs/DiscoveryPID_YYYYMMDD_HHMMSS.csv
-
-The CSV file is flushed after every sample, making it a useful recovery file
-and a convenient import format for JMP. The XLSX workbook is finalized when
-logging ends normally or when Ctrl+C is pressed.
+The logger also creates two CSV files:
+  DiscoveryPID_YYYYMMDD_HHMMSS.csv
+  DiscoveryPID_YYYYMMDD_HHMMSS_JMP.csv
 
 Examples:
-  python tools/serial_to_excel.py --port COM5 --target 100
-  python tools/serial_to_excel.py --port COM5 --target 100 --duration 60
-  python tools/serial_to_excel.py
+  py tools/serial_to_excel.py --port COM5 --p 1.25 --i 2.75 --target 100 --duration 30
+  py tools/serial_to_excel.py --port COM5 --target 100 --duration 60
 """
 
 from __future__ import annotations
@@ -36,31 +34,33 @@ from serial.tools import list_ports
 import xlsxwriter
 
 BAUD_RATE = 115200
-SCRIPT_VERSION = "1.0"
+SCRIPT_VERSION = "1.1-jmp-autotune"
 
-# Parses the firmware's key=value telemetry format, including negative values.
 PAIR_PATTERN = re.compile(
     r"([A-Za-z][A-Za-z0-9_]*)=(-?(?:\d+(?:\.\d*)?|\.\d+))"
 )
 
 REQUIRED_FIELDS = {
+    "P",
+    "I",
     "Target",
     "OutRPM",
     "MotorRPM",
-    "Error",
     "Integral",
     "Counts",
     "dC",
     "PWM",
 }
 
-HEADERS = [
+TELEMETRY_HEADERS = [
     "PC Timestamp",
     "Elapsed Time (s)",
+    "P",
+    "I",
     "Target RPM",
     "Output RPM",
     "Motor RPM",
-    "Error (RPM)",
+    "Error (Target - Output)",
     "Integral",
     "Encoder Counts",
     "Delta Counts",
@@ -68,10 +68,12 @@ HEADERS = [
     "Raw Serial Line",
 ]
 
+JMP_HEADERS = ["P", "I", "Error"]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Save DiscoveryPID serial telemetry to XLSX and CSV files."
+        description="Save DiscoveryPID telemetry to Excel, full CSV, and JMP CSV files."
     )
     parser.add_argument(
         "--port",
@@ -84,9 +86,27 @@ def parse_args() -> argparse.Namespace:
         help=f"Serial baud rate. Default: {BAUD_RATE}",
     )
     parser.add_argument(
+        "--p",
+        type=float,
+        default=2.0,
+        help="Proportional gain sent to the autotuning firmware. Default: 2.0",
+    )
+    parser.add_argument(
+        "--i",
+        type=float,
+        default=5.0,
+        help="Integral gain sent to the autotuning firmware. Default: 5.0",
+    )
+    parser.add_argument(
         "--target",
         type=float,
-        help="Optional target output RPM sent to the controller after connection.",
+        help="Optional target output RPM sent after P and I are configured.",
+    )
+    parser.add_argument(
+        "--trial",
+        type=int,
+        default=1,
+        help="Trial number included in firmware telemetry. Default: 1",
     )
     parser.add_argument(
         "--duration",
@@ -96,7 +116,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        help="Optional XLSX output path. The CSV backup uses the same file stem.",
+        help="Optional XLSX output path. CSV files use the same file stem.",
     )
     return parser.parse_args()
 
@@ -139,7 +159,7 @@ def parse_telemetry(line: str) -> Optional[Dict[str, float]]:
     return values
 
 
-def build_output_paths(output: Optional[Path]) -> tuple[Path, Path]:
+def build_output_paths(output: Optional[Path]) -> tuple[Path, Path, Path]:
     if output is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         xlsx_path = Path("data") / "logs" / f"DiscoveryPID_{timestamp}.xlsx"
@@ -149,12 +169,30 @@ def build_output_paths(output: Optional[Path]) -> tuple[Path, Path]:
             xlsx_path = xlsx_path.with_suffix(".xlsx")
 
     xlsx_path.parent.mkdir(parents=True, exist_ok=True)
-    csv_path = xlsx_path.with_suffix(".csv")
-    return xlsx_path, csv_path
+    full_csv_path = xlsx_path.with_suffix(".csv")
+    jmp_csv_path = xlsx_path.with_name(f"{xlsx_path.stem}_JMP.csv")
+    return xlsx_path, full_csv_path, jmp_csv_path
+
+
+def send_command(serial_port: serial.Serial, command: str) -> None:
+    serial_port.write(f"{command}\n".encode("ascii"))
+    serial_port.flush()
+    time.sleep(0.05)
+    print(f"Sent: {command}")
 
 
 def main() -> int:
     args = parse_args()
+
+    if not 0.0 <= args.p <= 10.0:
+        print("P must be between 0 and 10.", file=sys.stderr)
+        return 2
+    if not 0.0 <= args.i <= 50.0:
+        print("I must be between 0 and 50.", file=sys.stderr)
+        return 2
+    if args.duration is not None and args.duration <= 0:
+        print("Duration must be greater than zero.", file=sys.stderr)
+        return 2
 
     try:
         port_name = select_serial_port(args.port)
@@ -162,7 +200,7 @@ def main() -> int:
         print(f"Port selection error: {exc}", file=sys.stderr)
         return 2
 
-    xlsx_path, csv_path = build_output_paths(args.output)
+    xlsx_path, full_csv_path, jmp_csv_path = build_output_paths(args.output)
 
     print(f"Opening {port_name} at {args.baud} baud...")
     try:
@@ -177,18 +215,18 @@ def main() -> int:
         print("Close the PlatformIO serial monitor and try again.", file=sys.stderr)
         return 3
 
-    # Opening an Arduino serial port commonly resets the board. Give setup()
-    # time to run before flushing stale data and optionally sending a target.
+    # Opening the Mega serial port normally resets it.
     time.sleep(2.0)
-    serial_port.reset_input_buffer()
 
+    send_command(serial_port, f"TRIAL={args.trial}")
+    send_command(serial_port, f"P={args.p}")
+    send_command(serial_port, f"I={args.i}")
     if args.target is not None:
-        serial_port.write(f"{args.target}\n".encode("ascii"))
-        serial_port.flush()
-        print(f"Sent target RPM: {args.target}")
+        send_command(serial_port, f"RPM={args.target}")
 
     workbook = xlsxwriter.Workbook(str(xlsx_path))
     telemetry_sheet = workbook.add_worksheet("Telemetry")
+    jmp_sheet = workbook.add_worksheet("JMP Data")
     summary_sheet = workbook.add_worksheet("Summary")
     metadata_sheet = workbook.add_worksheet("Metadata")
 
@@ -203,44 +241,56 @@ def main() -> int:
         }
     )
     timestamp_format = workbook.add_format({"num_format": "yyyy-mm-dd hh:mm:ss.000"})
-    number_format = workbook.add_format({"num_format": "0.00"})
+    number_format = workbook.add_format({"num_format": "0.000"})
     integer_format = workbook.add_format({"num_format": "0"})
     title_format = workbook.add_format(
         {"bold": True, "font_size": 16, "font_color": "#1F4E78"}
     )
     label_format = workbook.add_format({"bold": True, "bg_color": "#D9EAF7"})
 
-    for column, header in enumerate(HEADERS):
+    for column, header in enumerate(TELEMETRY_HEADERS):
         telemetry_sheet.write(0, column, header, header_format)
+    for column, header in enumerate(JMP_HEADERS):
+        jmp_sheet.write(0, column, header, header_format)
 
     telemetry_sheet.freeze_panes(1, 0)
     telemetry_sheet.set_column("A:A", 24)
     telemetry_sheet.set_column("B:B", 16)
-    telemetry_sheet.set_column("C:G", 14)
-    telemetry_sheet.set_column("H:I", 15)
-    telemetry_sheet.set_column("J:J", 14)
-    telemetry_sheet.set_column("K:K", 90)
+    telemetry_sheet.set_column("C:L", 16)
+    telemetry_sheet.set_column("M:M", 100)
 
-    metadata_sheet.set_column("A:A", 24)
-    metadata_sheet.set_column("B:B", 60)
+    jmp_sheet.freeze_panes(1, 0)
+    jmp_sheet.set_column("A:C", 20)
+
+    metadata_sheet.set_column("A:A", 26)
+    metadata_sheet.set_column("B:B", 70)
     metadata_sheet.write("A1", "DiscoveryPID Log Metadata", title_format)
     metadata_rows = [
         ("Logger version", SCRIPT_VERSION),
         ("Serial port", port_name),
         ("Baud rate", args.baud),
         ("Logging started", datetime.now().isoformat(timespec="seconds")),
+        ("Trial", args.trial),
+        ("Requested P", args.p),
+        ("Requested I", args.i),
         ("Requested target RPM", args.target if args.target is not None else "Not sent"),
         ("XLSX path", str(xlsx_path.resolve())),
-        ("CSV backup path", str(csv_path.resolve())),
+        ("Full CSV path", str(full_csv_path.resolve())),
+        ("JMP CSV path", str(jmp_csv_path.resolve())),
     ]
-    for row_index, (label, value) in enumerate(metadata_rows, start=2):
-        metadata_sheet.write(row_index, 0, label, label_format)
-        metadata_sheet.write(row_index, 1, value)
+    for metadata_row, (label, value) in enumerate(metadata_rows, start=2):
+        metadata_sheet.write(metadata_row, 0, label, label_format)
+        metadata_sheet.write(metadata_row, 1, value)
 
-    csv_file = csv_path.open("w", newline="", encoding="utf-8")
-    csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(HEADERS)
-    csv_file.flush()
+    full_csv_file = full_csv_path.open("w", newline="", encoding="utf-8")
+    full_csv_writer = csv.writer(full_csv_file)
+    full_csv_writer.writerow(TELEMETRY_HEADERS)
+    full_csv_file.flush()
+
+    jmp_csv_file = jmp_csv_path.open("w", newline="", encoding="utf-8")
+    jmp_csv_writer = csv.writer(jmp_csv_file)
+    jmp_csv_writer.writerow(JMP_HEADERS)
+    jmp_csv_file.flush()
 
     start_monotonic = time.monotonic()
     start_wall_clock = datetime.now()
@@ -248,12 +298,15 @@ def main() -> int:
     output_rpm_values: list[float] = []
     error_values: list[float] = []
     pwm_values: list[float] = []
+    p_values: list[float] = []
+    i_values: list[float] = []
     firmware_line = "Not detected"
     startup_messages: list[str] = []
 
-    print("Logging telemetry. Press Ctrl+C to stop and finalize the Excel file.")
-    print(f"XLSX: {xlsx_path.resolve()}")
-    print(f"CSV:  {csv_path.resolve()}")
+    print("Logging telemetry. Press Ctrl+C to stop and finalize the files.")
+    print(f"XLSX:     {xlsx_path.resolve()}")
+    print(f"Full CSV: {full_csv_path.resolve()}")
+    print(f"JMP CSV:  {jmp_csv_path.resolve()}")
 
     try:
         while True:
@@ -283,14 +336,21 @@ def main() -> int:
 
             now = datetime.now()
             elapsed_seconds = time.monotonic() - start_monotonic
+            p_gain = telemetry["P"]
+            i_gain = telemetry["I"]
+            target_rpm = telemetry["Target"]
+            output_rpm = telemetry["OutRPM"]
+            error = target_rpm - output_rpm
 
-            row = [
+            telemetry_row = [
                 now,
                 elapsed_seconds,
-                telemetry["Target"],
-                telemetry["OutRPM"],
+                p_gain,
+                i_gain,
+                target_rpm,
+                output_rpm,
                 telemetry["MotorRPM"],
-                telemetry["Error"],
+                error,
                 telemetry["Integral"],
                 int(telemetry["Counts"]),
                 int(telemetry["dC"]),
@@ -299,22 +359,29 @@ def main() -> int:
             ]
 
             telemetry_sheet.write_datetime(row_index, 0, now, timestamp_format)
-            telemetry_sheet.write_number(row_index, 1, elapsed_seconds, number_format)
-            for column in range(2, 7):
-                telemetry_sheet.write_number(row_index, column, float(row[column]), number_format)
-            telemetry_sheet.write_number(row_index, 7, int(row[7]), integer_format)
-            telemetry_sheet.write_number(row_index, 8, int(row[8]), integer_format)
-            telemetry_sheet.write_number(row_index, 9, float(row[9]), number_format)
-            telemetry_sheet.write_string(row_index, 10, line)
+            for column in range(1, 9):
+                telemetry_sheet.write_number(
+                    row_index, column, float(telemetry_row[column]), number_format
+                )
+            telemetry_sheet.write_number(row_index, 9, telemetry_row[9], integer_format)
+            telemetry_sheet.write_number(row_index, 10, telemetry_row[10], integer_format)
+            telemetry_sheet.write_number(row_index, 11, telemetry_row[11], number_format)
+            telemetry_sheet.write_string(row_index, 12, line)
 
-            csv_writer.writerow(
+            jmp_sheet.write_number(row_index, 0, p_gain, number_format)
+            jmp_sheet.write_number(row_index, 1, i_gain, number_format)
+            jmp_sheet.write_number(row_index, 2, error, number_format)
+
+            full_csv_writer.writerow(
                 [
                     now.isoformat(timespec="milliseconds"),
                     f"{elapsed_seconds:.3f}",
-                    telemetry["Target"],
-                    telemetry["OutRPM"],
+                    p_gain,
+                    i_gain,
+                    target_rpm,
+                    output_rpm,
                     telemetry["MotorRPM"],
-                    telemetry["Error"],
+                    error,
                     telemetry["Integral"],
                     int(telemetry["Counts"]),
                     int(telemetry["dC"]),
@@ -322,46 +389,50 @@ def main() -> int:
                     line,
                 ]
             )
-            csv_file.flush()
+            full_csv_file.flush()
 
-            output_rpm_values.append(telemetry["OutRPM"])
-            error_values.append(telemetry["Error"])
+            jmp_csv_writer.writerow([p_gain, i_gain, error])
+            jmp_csv_file.flush()
+
+            p_values.append(p_gain)
+            i_values.append(i_gain)
+            output_rpm_values.append(output_rpm)
+            error_values.append(error)
             pwm_values.append(telemetry["PWM"])
             row_index += 1
 
     except KeyboardInterrupt:
         print("\nStopping logger...")
     finally:
-        # Stop the motor before releasing the serial port.
         try:
-            serial_port.write(b"0\n")
-            serial_port.flush()
-            time.sleep(0.1)
+            send_command(serial_port, "STOP")
         except SerialException:
             pass
 
         serial_port.close()
-        csv_file.close()
+        full_csv_file.close()
+        jmp_csv_file.close()
 
         sample_count = row_index - 1
         duration_seconds = max(0.0, time.monotonic() - start_monotonic)
 
-        metadata_sheet.write("A11", "Detected firmware", label_format)
-        metadata_sheet.write("B11", firmware_line)
-        metadata_sheet.write("A12", "Samples recorded", label_format)
-        metadata_sheet.write("B12", sample_count)
-        metadata_sheet.write("A13", "Logging duration (s)", label_format)
-        metadata_sheet.write("B13", duration_seconds)
-        metadata_sheet.write("A15", "Startup / status messages", label_format)
-        for offset, message in enumerate(startup_messages, start=15):
+        metadata_sheet.write("A15", "Detected firmware", label_format)
+        metadata_sheet.write("B15", firmware_line)
+        metadata_sheet.write("A16", "Samples recorded", label_format)
+        metadata_sheet.write("B16", sample_count)
+        metadata_sheet.write("A17", "Logging duration (s)", label_format)
+        metadata_sheet.write("B17", duration_seconds)
+        metadata_sheet.write("A19", "Startup / status messages", label_format)
+        for offset, message in enumerate(startup_messages, start=19):
             metadata_sheet.write(offset, 0, message)
 
-        summary_sheet.set_column("A:A", 28)
-        summary_sheet.set_column("B:B", 18)
+        summary_sheet.set_column("A:A", 32)
+        summary_sheet.set_column("B:B", 20)
         summary_sheet.write("A1", "DiscoveryPID Test Summary", title_format)
 
-        summary_values = [
+        summary_values: list[tuple[str, object]] = [
             ("Start time", start_wall_clock.isoformat(timespec="seconds")),
+            ("Trial", args.trial),
             ("Samples", sample_count),
             ("Duration (s)", duration_seconds),
         ]
@@ -369,6 +440,8 @@ def main() -> int:
         if sample_count > 0:
             summary_values.extend(
                 [
+                    ("P", statistics.fmean(p_values)),
+                    ("I", statistics.fmean(i_values)),
                     ("Mean output RPM", statistics.fmean(output_rpm_values)),
                     ("Minimum output RPM", min(output_rpm_values)),
                     ("Maximum output RPM", max(output_rpm_values)),
@@ -382,6 +455,7 @@ def main() -> int:
                         "Mean absolute RPM error",
                         statistics.fmean(abs(value) for value in error_values),
                     ),
+                    ("Mean signed RPM error", statistics.fmean(error_values)),
                     ("Mean PWM command", statistics.fmean(pwm_values)),
                 ]
             )
@@ -395,14 +469,17 @@ def main() -> int:
 
         if sample_count > 0:
             last_excel_row = sample_count
-            telemetry_sheet.autofilter(0, 0, last_excel_row, len(HEADERS) - 1)
+            telemetry_sheet.autofilter(
+                0, 0, last_excel_row, len(TELEMETRY_HEADERS) - 1
+            )
+            jmp_sheet.autofilter(0, 0, last_excel_row, len(JMP_HEADERS) - 1)
 
             speed_chart = workbook.add_chart({"type": "line"})
             speed_chart.add_series(
                 {
                     "name": "Target RPM",
                     "categories": ["Telemetry", 1, 1, last_excel_row, 1],
-                    "values": ["Telemetry", 1, 2, last_excel_row, 2],
+                    "values": ["Telemetry", 1, 4, last_excel_row, 4],
                     "line": {"width": 1.5},
                 }
             )
@@ -410,7 +487,7 @@ def main() -> int:
                 {
                     "name": "Output RPM",
                     "categories": ["Telemetry", 1, 1, last_excel_row, 1],
-                    "values": ["Telemetry", 1, 3, last_excel_row, 3],
+                    "values": ["Telemetry", 1, 5, last_excel_row, 5],
                     "line": {"width": 1.5},
                 }
             )
@@ -426,7 +503,7 @@ def main() -> int:
                 {
                     "name": "PWM Command",
                     "categories": ["Telemetry", 1, 1, last_excel_row, 1],
-                    "values": ["Telemetry", 1, 9, last_excel_row, 9],
+                    "values": ["Telemetry", 1, 11, last_excel_row, 11],
                     "line": {"width": 1.5},
                 }
             )
@@ -440,7 +517,8 @@ def main() -> int:
         workbook.close()
 
     print(f"Saved Excel workbook: {xlsx_path.resolve()}")
-    print(f"Saved CSV backup:     {csv_path.resolve()}")
+    print(f"Saved full CSV:       {full_csv_path.resolve()}")
+    print(f"Saved JMP CSV:        {jmp_csv_path.resolve()}")
     return 0
 
 
