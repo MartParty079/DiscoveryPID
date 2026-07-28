@@ -5,6 +5,10 @@
 #include <Arduino.h>
 #include <stdlib.h>
 
+// Printed during startup so the uploaded build can be verified in the serial
+// monitor before the motor is tested.
+const char FIRMWARE_VERSION[] = "DiscoveryPID safety-v2 2026-07-28";
+
 // =====================================================
 // HARDWARE PIN ASSIGNMENTS
 // =====================================================
@@ -220,6 +224,9 @@ void setup()
     previousControlTime = millis();
 
     Serial.println("DiscoveryPID ready");
+    Serial.print("Firmware: ");
+    Serial.println(FIRMWARE_VERSION);
+    Serial.println("Direction reversal guard: ON");
     Serial.println("Send target output RPM and press Enter");
 }
 
