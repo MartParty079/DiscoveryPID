@@ -1,332 +1,314 @@
 /*
-  DC Motor Speed Controller with PI Feedback
-  ------------------------------------------
-  This program measures motor speed from a Hall-effect encoder and adjusts
-  the motor driver's PWM command to hold a requested shaft speed.
+  Adafruit 4416 PI Motor Speed Controller
+  =======================================
 
-  Main program flow:
-    1. Count encoder transitions in an interrupt service routine (ISR).
-    2. Convert the number of new counts into measured RPM.
-    3. Compare measured RPM with the target RPM.
-    4. Calculate a PI correction from proportional and integral error.
-    5. Apply motor direction and PWM output.
-    6. Print test data for tuning and later JMP analysis.
+  This is the active DiscoveryPID controller firmware.
 
-  Hardware Assumptions:
-  ---------------------
-  Encoder Hall Sensors:
-    HALL_A -> pin 2  (interrupt pin)
-    HALL_B -> pin 3  (interrupt pin, currently disabled in software)
+  The program:
+    1. Reads both quadrature encoder channels with interrupts.
+    2. Converts encoder movement into motor-shaft RPM.
+    3. Divides by the gearbox ratio to calculate output-shaft RPM.
+    4. Uses a PI controller to make output RPM follow targetRPM.
+    5. Sends signed direction and PWM commands to the motor driver.
+    6. Prints operating data for testing and future JMP Bayesian optimization.
 
-  Motor Driver:
-    PWM_PIN -> PWM speed input
-    DIR_PIN -> direction input
+  Hardware mapping:
+    Encoder channel A -> digital pin 2
+    Encoder channel B -> digital pin 3
+    Direction output  -> digital pin 9
+    PWM output        -> digital pin 10
 
-  Serial Commands:
-    Send the desired RPM as a number through the Serial Monitor.
+  Serial input:
+    Send a number at 115200 baud to change the target output-shaft RPM.
+    Example: 100
 
-    Examples:
-      150
-      300
-      -200
-
-  Important configuration notes:
-    - Tune KP and KI for the actual motor, load, and sample interval.
-    - Verify PULSES_PER_REV against the encoder datasheet and the selected
-      edge-counting method before trusting the reported RPM.
-    - The current ISR counts transitions from Hall A only. The full
-      two-channel quadrature direction logic is retained below but disabled.
-    - The output method is intended for motor drivers with separate PWM and
-      direction inputs, such as a DRV8871-style interface.
+  Important:
+    - GEAR_RATIO and CPR_X4 must match the physical drivetrain and encoder.
+    - KP and KI are the PI gains that will be tuned during testing.
+    - targetRPM and rpmOut refer to the gearbox OUTPUT shaft.
+    - motorRPM refers to the motor shaft before the gearbox reduction.
 */
 
 #include <Arduino.h>
 
 // =====================================================
-// PIN DEFINITIONS
+// HARDWARE PIN ASSIGNMENTS
 // =====================================================
-// These constants map the software signals to physical Arduino pins.
-// Keeping all pin assignments in one block makes wiring changes easier and
-// prevents hard-coded pin numbers from being scattered throughout the code.
-
-const int HALL_A_PIN = 2; // Green encoder wire; active interrupt input.
-const int HALL_B_PIN = 3; // White encoder wire; reserved for quadrature decoding.
-
-const int PWM_PIN = 10; // Motor-driver IN2 / PWM speed command.
-const int DIR_PIN = 9;  // Motor-driver IN1 / direction command.
-
-// Previous direct motor-input names are retained for reference only.
-// const int Motor_IN2 = 10;
-// const int Motor_IN1 = 9;
+// uint8_t is appropriate because Arduino pin numbers are small nonnegative
+// integers. Keeping the assignments together makes hardware changes simple.
+const uint8_t ENC_A = 2;
+const uint8_t ENC_B = 3;
+const uint8_t DIR_PIN = 9;
+const uint8_t PWM_PIN = 10;
 
 // =====================================================
-// ENCODER SETTINGS
+// DRIVETRAIN AND ENCODER CALIBRATION
 // =====================================================
-// These values convert interrupt counts into mechanical revolutions.
-// They must match both the encoder hardware and the ISR counting method.
+// Motor speed is divided by this ratio to obtain output-shaft speed.
+// A ratio of 20.4 means the motor turns 20.4 revolutions for every output
+// shaft revolution.
+const float GEAR_RATIO = 20.4f;
 
-// Nominal pulses produced by one encoder channel per revolution.
-// Confirm whether this refers to the motor shaft or output shaft.
-const int PULSES_PER_REV = 20;
-
-// A full quadrature decoder can count rising and falling edges on both
-// channels, producing four counts per encoder pulse. The current ISR only
-// watches Hall A, so this multiplier must be verified during calibration.
-const int COUNTS_PER_REV = PULSES_PER_REV * 4;
+// Encoder counts per MOTOR revolution when using full x4 quadrature decoding.
+// The encoder produces 7 cycles per channel, and both rising and falling edges
+// on both channels are counted: 7 cycles x 4 edges = 28 counts/revolution.
+const int CPR_X4 = 28;
 
 // =====================================================
-// PI CONTROLLER SETTINGS
+// PI CONTROLLER GAINS
 // =====================================================
-// KP determines how strongly the controller reacts to the present RPM error.
-// KI determines how strongly it reacts to accumulated error over time.
-// These are intentionally non-constant so future serial or JMP integration
-// can update them during controller optimization experiments.
+// KP controls the immediate response to current speed error.
+// KI controls the correction based on accumulated speed error over time.
+// These values are expected to be tuned using controlled experiments and JMP.
+const float KP = 2.0f;
+const float KI = 5.0f;
 
-float KP = 1.2;
-float KI = 0.8;
-
-// =====================================================
-// CONTROL LOOP SETTINGS
-// =====================================================
-// Requested period between PI calculations. A 20 ms interval corresponds to
-// a nominal 50 Hz controller update rate. The delay currently used in loop()
-// can make the effective update rate slower than this requested interval.
-
-const unsigned long CONTROL_INTERVAL_MS = 20;
+// Controller sample period in milliseconds.
+// 20 ms corresponds to a nominal control frequency of 50 Hz.
+const uint32_t Ts_ms = 20;
 
 // =====================================================
-// GLOBAL STATE VARIABLES
+// ENCODER STATE SHARED WITH INTERRUPTS
 // =====================================================
-// Variables shared between the interrupt routine, control calculation, and
-// serial interface are stored here so their values persist between loop calls.
+// These variables are modified inside the interrupt service routine, so they
+// are marked volatile to prevent the compiler from assuming they stay constant.
+volatile long encCount = 0;
+volatile uint8_t prevState = 0;
 
-// Updated inside the encoder ISR. "volatile" tells the compiler that this
-// value can change unexpectedly outside the normal program flow.
-volatile long encoderCount = 0;
+// =====================================================
+// CONTROLLER AND MEASUREMENT STATE
+// =====================================================
+// Requested output-shaft speed in RPM. This can be changed through Serial.
+float targetRPM = 100.0f;
 
-// Encoder count saved at the previous control update. The difference between
-// this value and the new count gives the movement during one sample period.
-long previousEncoderCount = 0;
+// Most recently calculated output-shaft speed in RPM.
+float rpmOut = 0.0f;
 
-// Requested and calculated motor speeds in revolutions per minute.
-float targetRPM = 150.0;
-float measuredRPM = 0.0;
+// Accumulated error used by the integral portion of the PI controller.
+float integ = 0.0f;
 
-// Running integral of RPM error used by the I portion of the PI controller.
-float integralTerm = 0.0;
+// Encoder count captured during the previous controller update.
+long lastCount = 0;
 
-// Timestamp of the previous controller calculation, measured in milliseconds
-// since the Arduino started.
-unsigned long lastControlTime = 0;
+// Time of the previous controller update in milliseconds since startup.
+uint32_t lastT = 0;
+
+// =====================================================
+// QUADRATURE ENCODER LOOKUP TABLE
+// =====================================================
+// Each encoder state is represented by two bits: AB.
+// Combining the previous AB state and current AB state creates a 4-bit index:
+//
+//   index = previous_AB << 2 | current_AB
+//
+// The lookup table returns:
+//   +1 for one valid direction step
+//   -1 for one valid step in the opposite direction
+//    0 for no movement or an invalid/noisy transition
+//
+// This compact method avoids multiple conditional branches inside the ISR.
+const int8_t qem[16] = {
+     0, -1,  1,  0,
+     1,  0,  0, -1,
+    -1,  0,  0,  1,
+     0,  1, -1,  0
+};
 
 // =====================================================
 // ENCODER INTERRUPT SERVICE ROUTINE
 // =====================================================
-// This function runs immediately whenever Hall A changes state. ISR code
-// should remain short because normal program execution pauses while it runs.
-// The present implementation counts speed only and does not detect direction.
-
-void updateEncoder()
+// This routine runs whenever either encoder channel changes state. It must stay
+// short because the main program is paused while the interrupt is executing.
+void encoderISR()
 {
-    // Full quadrature decoding would read both channels and use their relative
-    // states to decide whether the shaft moved forward or backward.
-    // bool A = digitalRead(HALL_A_PIN);
-    // bool B = digitalRead(HALL_B_PIN);
+    // Read both encoder channels and combine them into a two-bit AB state.
+    uint8_t currentState =
+        (static_cast<uint8_t>(digitalRead(ENC_A)) << 1) |
+        static_cast<uint8_t>(digitalRead(ENC_B));
 
-    // Count every detected CHANGE edge on Hall A. This always increments,
-    // meaning reverse rotation is not represented by a negative count.
-    encoderCount++;
+    // Build the lookup-table index from the previous and current AB states.
+    uint8_t tableIndex = (prevState << 2) | currentState;
 
-    // Optional full quadrature direction logic, currently disabled.
-    // if (A == B)
-    // {
-    //     encoderCount++;
-    // }
-    // else
-    // {
-    //     encoderCount--;
-    // }
+    // Add the signed movement represented by this encoder transition.
+    encCount += qem[tableIndex];
+
+    // Save the current state for the next encoder transition.
+    prevState = currentState;
 }
 
 // =====================================================
-// MOTOR OUTPUT FUNCTION
+// MOTOR DRIVER OUTPUT
 // =====================================================
-// Converts the signed PI controller command into two hardware signals:
-//   - The sign selects motor direction.
-//   - The magnitude selects PWM duty cycle and therefore drive effort.
-
-void setMotorOutput(float controlSignal)
+// The PI controller creates a signed command u:
+//   positive u -> one direction
+//   negative u -> opposite direction
+//   abs(u)     -> PWM duty command from 0 to 255
+void setMotor(float u)
 {
-    // Limit the requested drive command to the usable analogWrite range used
-    // by this project. Clamping also prevents extreme PI values from being
-    // sent directly to the motor driver.
-    controlSignal = constrain(controlSignal, -250, 250);
+    // Select direction from the sign of the controller output.
+    bool direction = (u >= 0.0f);
 
-    // Positive and zero commands select the forward direction. Negative
-    // commands select reverse. Reverse control is only reliable when encoder
-    // direction sensing is also enabled.
-    if (controlSignal >= 0)
-    {
-        digitalWrite(DIR_PIN, HIGH);
-    }
-    else
-    {
-        digitalWrite(DIR_PIN, LOW);
-    }
+    // Convert the controller output into an Arduino 8-bit PWM value.
+    // fabs() removes the sign because direction is handled separately.
+    int pwm = constrain(static_cast<int>(fabs(u)), 0, 255);
 
-    // analogWrite expects a nonnegative PWM magnitude. Direction has already
-    // been assigned above, so only the absolute controller output is used.
-    int pwmValue = abs((int)controlSignal);
-
-    // Send the PWM command to the motor driver.
-    analogWrite(PWM_PIN, pwmValue);
+    digitalWrite(DIR_PIN, direction ? HIGH : LOW);
+    analogWrite(PWM_PIN, pwm);
 }
 
 // =====================================================
 // ARDUINO STARTUP
 // =====================================================
-// setup() runs once after power-up or reset. It initializes communication,
-// configures the I/O pins, and enables the encoder interrupt.
-
+// setup() runs once after power-up or reset.
 void setup()
 {
-    // Serial data is used for target commands and test-data output.
+    // Start serial communication for target commands and test-data output.
     Serial.begin(115200);
 
-    // Encoder input. Hall B remains disabled until full quadrature decoding
-    // is enabled in updateEncoder().
-    pinMode(HALL_A_PIN, INPUT);
-    // pinMode(HALL_B_PIN, INPUT);
+    // Configure both quadrature encoder signals as digital inputs.
+    pinMode(ENC_A, INPUT);
+    pinMode(ENC_B, INPUT);
 
-    // Motor-driver command outputs.
-    pinMode(PWM_PIN, OUTPUT);
+    // Configure the motor-driver control signals as outputs.
     pinMode(DIR_PIN, OUTPUT);
+    pinMode(PWM_PIN, OUTPUT);
 
-    // Previous direct motor-input configuration retained for reference.
-    // pinMode(Motor_IN2, OUTPUT);
-    // pinMode(Motor_IN1, OUTPUT);
+    // Read the encoder's initial AB state before enabling interrupts. This
+    // prevents the first transition from being compared with an assumed state.
+    prevState =
+        (static_cast<uint8_t>(digitalRead(ENC_A)) << 1) |
+        static_cast<uint8_t>(digitalRead(ENC_B));
 
-    // Call updateEncoder() on every rising or falling transition of Hall A.
-    attachInterrupt(digitalPinToInterrupt(HALL_A_PIN), updateEncoder, CHANGE);
-    // attachInterrupt(digitalPinToInterrupt(HALL_B_PIN), updateEncoder, CHANGE);
+    // Run encoderISR() on both rising and falling edges of both channels.
+    // This provides full x4 quadrature decoding.
+    attachInterrupt(digitalPinToInterrupt(ENC_A), encoderISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENC_B), encoderISR, CHANGE);
 
-    // Startup messages confirm that the controller is running and explain how
-    // to change the commanded speed.
-    Serial.println("PI Motor Speed Controller");
-    Serial.println("Send target RPM via Serial");
+    // Initialize controller timing so the first sample uses a valid elapsed time.
+    lastT = millis();
+
+    Serial.println("DiscoveryPID controller ready");
+    Serial.println("Send target output RPM as a number");
 }
 
 // =====================================================
-// CONTINUOUS PROGRAM LOOP
+// CONTINUOUS CONTROL LOOP
 // =====================================================
-// loop() repeats for as long as the Arduino is powered. It accepts new target
-// commands and executes the timed measurement-and-control sequence.
-
+// loop() repeatedly checks for serial commands and runs the PI controller at
+// approximately the requested sample period.
 void loop()
 {
-    // Reduce the amount of serial traffic and CPU activity. Note that this
-    // 100 ms blocking delay currently limits how often the 20 ms control test
-    // below can actually be reached.
-    delay(100);
-
     // -------------------------------------------------
-    // READ A NEW TARGET RPM FROM SERIAL
+    // READ A NEW OUTPUT-SHAFT RPM TARGET
     // -------------------------------------------------
-    // Serial.parseFloat() converts the next numeric serial value into a float.
-    // The previous target remains active until another number is received.
-    if (Serial.available())
+    // parseFloat() reads the next number received through the Serial Monitor.
+    // The previous target remains active until another value is sent.
+    if (Serial.available() > 0)
     {
         targetRPM = Serial.parseFloat();
 
-        Serial.print("New Target RPM: ");
+        Serial.print("New target output RPM: ");
         Serial.println(targetRPM);
     }
 
     // -------------------------------------------------
-    // CHECK WHETHER IT IS TIME FOR A CONTROL UPDATE
+    // RUN THE TIMED CONTROL UPDATE
     // -------------------------------------------------
-    // millis() is used instead of an absolute schedule so the controller keeps
-    // operating correctly as the Arduino uptime increases.
-    unsigned long now = millis();
+    uint32_t now = millis();
 
-    if (now - lastControlTime >= CONTROL_INTERVAL_MS)
+    if (now - lastT >= Ts_ms)
     {
-        // Convert elapsed milliseconds into seconds for RPM and integral math.
-        // Using the measured elapsed time compensates for some loop jitter.
-        float dt = (now - lastControlTime) / 1000.0;
+        // Use the actual elapsed time rather than assuming it is exactly Ts_ms.
+        // This reduces error caused by small variations in loop execution time.
+        float dt = (now - lastT) / 1000.0f;
+        lastT = now;
 
-        // Save the current time as the start point for the next sample.
-        lastControlTime = now;
-
-        // -------------------------------------------------
+        // ---------------------------------------------
         // COPY THE ENCODER COUNT SAFELY
-        // -------------------------------------------------
-        // encoderCount can change inside the ISR. Interrupts are disabled only
-        // long enough to copy it, preventing a partially updated long integer
-        // from being read by the main program.
+        // ---------------------------------------------
+        // encCount can change during an interrupt. Interrupts are disabled only
+        // long enough to copy it, avoiding a partially updated long integer.
         noInterrupts();
-        long currentCount = encoderCount;
+        long currentCount = encCount;
         interrupts();
 
-        // Determine how many encoder counts occurred during this sample.
-        long deltaCounts = currentCount - previousEncoderCount;
-        previousEncoderCount = currentCount;
+        // Count movement that occurred during this controller sample.
+        long deltaCount = currentCount - lastCount;
+        lastCount = currentCount;
 
-        // -------------------------------------------------
-        // CONVERT ENCODER COUNTS TO RPM
-        // -------------------------------------------------
-        // First convert counts into revolutions, then divide by elapsed seconds
-        // to obtain revolutions per second, and finally multiply by 60.
-        float revs = (float)deltaCounts / COUNTS_PER_REV;
-        measuredRPM = (revs / dt) * 60.0;
+        // ---------------------------------------------
+        // CALCULATE MOTOR AND OUTPUT-SHAFT RPM
+        // ---------------------------------------------
+        // Convert encoder counts/sample into motor revolutions/sample, then
+        // multiply by 60/dt to obtain motor revolutions per minute.
+        float motorRPM =
+            (static_cast<float>(deltaCount) / CPR_X4) * (60.0f / dt);
 
-        // -------------------------------------------------
-        // CALCULATE THE PI CONTROLLER OUTPUT
-        // -------------------------------------------------
-        // Error is positive when the motor is slower than requested and
-        // negative when it is faster than requested.
-        float error = targetRPM - measuredRPM;
+        // Apply the gearbox reduction to calculate output-shaft RPM.
+        rpmOut = motorRPM / GEAR_RATIO;
 
-        // Numerically integrate error over time. Multiplying by dt makes the
-        // integral less dependent on the exact controller sample interval.
-        integralTerm += error * dt;
+        // ---------------------------------------------
+        // CALCULATE THE PI CONTROLLER COMMAND
+        // ---------------------------------------------
+        // Positive error means the output shaft is moving slower than requested.
+        float error = targetRPM - rpmOut;
 
-        // Anti-windup limits stored integral error while the motor command is
-        // saturated or the target cannot be reached.
-        integralTerm = constrain(integralTerm, -300, 300);
+        // Calculate a candidate integral value but do not immediately accept it.
+        float proposedIntegral = integ + error * dt;
 
-        // PI equation:
-        //   output = proportional response + accumulated integral response
-        float controlSignal =
+        // Calculate a preliminary controller command using the candidate integral.
+        float unsaturatedCommand =
             (KP * error) +
-            (KI * integralTerm);
+            (KI * proposedIntegral);
 
-        // -------------------------------------------------
-        // APPLY THE CONTROLLER COMMAND TO THE MOTOR
-        // -------------------------------------------------
-        setMotorOutput(controlSignal);
+        // Conditional-integration anti-windup:
+        // Only store additional integral error when the proposed controller output
+        // is not saturated. This reduces integral buildup beyond motor capability.
+        if (unsaturatedCommand < 255.0f && unsaturatedCommand > -255.0f)
+        {
+            integ = proposedIntegral;
+        }
 
-        // -------------------------------------------------
-        // PRINT CONTROLLER DATA FOR TESTING AND TUNING
-        // -------------------------------------------------
-        // These values allow the response to be reviewed in the Serial Monitor
-        // and can later be converted to structured CSV data for JMP Bayesian
-        // optimization and comparison between KP/KI combinations.
-        Serial.print("Target: ");
-        Serial.print(targetRPM);
+        // Recalculate the PI command using the accepted integral state.
+        float controlCommand =
+            (KP * error) +
+            (KI * integ);
 
-        Serial.print(" RPM | Measured: ");
-        Serial.print(measuredRPM);
+        // Limit the final command to the Arduino PWM range.
+        controlCommand = constrain(controlCommand, -255.0f, 255.0f);
 
-        Serial.print(" RPM | PWM: ");
-        Serial.print(controlSignal);
+        // Apply direction and PWM to the motor driver.
+        setMotor(controlCommand);
 
-        Serial.print("Count: ");
-        Serial.print(currentCount);
+        // ---------------------------------------------
+        // PRINT TEST DATA
+        // ---------------------------------------------
+        // The controller runs nominally at 50 Hz, but printing every fifth update
+        // reduces serial traffic to approximately 10 records per second.
+        // These fields can later be converted into CSV columns for JMP analysis.
+        static int printDivider = 0;
 
-        Serial.print("  Delta: ");
-        Serial.print(deltaCounts);
+        if (++printDivider >= 5)
+        {
+            printDivider = 0;
 
-        Serial.println();
+            Serial.print("Target=");
+            Serial.print(targetRPM);
+
+            Serial.print(" OutRPM=");
+            Serial.print(rpmOut, 1);
+
+            Serial.print(" MotorRPM=");
+            Serial.print(motorRPM, 0);
+
+            Serial.print(" Counts=");
+            Serial.print(currentCount);
+
+            Serial.print(" dC=");
+            Serial.print(deltaCount);
+
+            Serial.print(" PWM=");
+            Serial.println(controlCommand);
+        }
     }
 }
