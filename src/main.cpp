@@ -1,70 +1,51 @@
-// Adafruit_4416_PI_Controller.ino
-// Active DiscoveryPID firmware for Arduino Mega 2560 + Adafruit 4416 motor
-// + Adafruit DRV8871 motor-driver breakout.
+// DiscoveryPID JMP autotuning firmware
+// Arduino Mega 2560 + Adafruit 4416 geared motor + DRV8871 driver.
 
 #include <Arduino.h>
 #include <stdlib.h>
+#include <string.h>
 
-// Printed during startup so the uploaded build can be verified in the serial
-// monitor before the motor is tested.
-const char FIRMWARE_VERSION[] = "DiscoveryPID safety-v2 2026-07-28";
+const char FIRMWARE_VERSION[] = "DiscoveryPID jmp-autotune-v1 2026-07-28";
 
 // =====================================================
-// HARDWARE PIN ASSIGNMENTS
+// HARDWARE
 // =====================================================
-// Encoder white/yellow signal wires connect to Mega interrupt pins 2 and 3.
 const uint8_t ENC_A_PIN = 2;
 const uint8_t ENC_B_PIN = 3;
-
-// The DRV8871 has two H-bridge inputs. Both are connected to PWM-capable pins.
-// It is not a separate direction-pin + PWM-pin driver.
 const uint8_t MOTOR_IN1_PIN = 9;
 const uint8_t MOTOR_IN2_PIN = 10;
 
 // =====================================================
-// MOTOR AND ENCODER CALIBRATION
+// MOTOR / ENCODER CALIBRATION
 // =====================================================
-// Adafruit publishes the exact gearbox ratio as 30613:1500 (~20.4087:1).
 const float GEAR_RATIO = 30613.0f / 1500.0f;
-
-// Adafruit specifies 14 counts per motor revolution when CHANGE edges from one
-// encoder channel are counted. This program uses both channels with full x4
-// quadrature decoding, so the expected count is 28 per motor revolution.
 const int COUNTS_PER_MOTOR_REV = 28;
-
-// Change this to -1 if positive motor command produces negative measured RPM.
-// Do this before PI tuning; a wrong sign can drive the controller to full PWM.
 const int8_t ENCODER_DIRECTION_SIGN = 1;
 
 // =====================================================
-// PI CONTROLLER SETTINGS
+// CONTROLLER SETTINGS
 // =====================================================
-// These are initial test gains only. They still require safe bench tuning and
-// will later be optimized with JMP Bayesian Optimization.
-const float KP = 2.0f;
-const float KI = 5.0f;
+// These are runtime variables on the autotuning branch. They can be changed
+// over USB serial without rebuilding or uploading the firmware again.
+float controllerP = 2.0f;
+float controllerI = 5.0f;
 
-// 20 ms gives a nominal 50 Hz controller update rate.
+const float MIN_P_GAIN = 0.0f;
+const float MAX_P_GAIN = 10.0f;
+const float MIN_I_GAIN = 0.0f;
+const float MAX_I_GAIN = 50.0f;
+
 const uint32_t CONTROL_INTERVAL_MS = 10;
-
-// Additional limit on stored integral error.
+const uint8_t PRINT_DIVIDER = 10; // 10 ms control x 10 = about 10 rows/second.
 const float INTEGRAL_LIMIT = 300.0f;
-
-// During normal speed regulation, a positive target may only command forward
-// drive or coast. A negative target may only command reverse drive or coast.
-// This prevents the PI controller from rapidly reversing the motor to correct
-// overshoot, which is unsafe and creates large encoder/RPM spikes.
 const bool PREVENT_ACTIVE_DIRECTION_REVERSAL = true;
 
 // =====================================================
 // ENCODER STATE
 // =====================================================
-// volatile is required because these variables are changed inside interrupts.
 volatile long encoderCount = 0;
 volatile uint8_t previousEncoderState = 0;
 
-// Quadrature transition table. Each index combines the previous AB state and
-// current AB state. Valid forward/reverse transitions return +1 or -1.
 const int8_t QUADRATURE_TABLE[16] = {
      0, -1,  1,  0,
      1,  0,  0, -1,
@@ -75,18 +56,17 @@ const int8_t QUADRATURE_TABLE[16] = {
 // =====================================================
 // CONTROLLER STATE
 // =====================================================
-// Start at zero so the motor cannot begin moving immediately after reset.
-float targetOutputRPM = 100.0f;
+float targetOutputRPM = 0.0f;
 float measuredOutputRPM = 0.0f;
 float integralError = 0.0f;
+unsigned long trialNumber = 0;
 
 long previousEncoderCount = 0;
 uint32_t previousControlTime = 0;
 
 // =====================================================
-// QUADRATURE ENCODER INTERRUPT
+// ENCODER INTERRUPT
 // =====================================================
-// This ISR runs on every CHANGE edge of both encoder channels. Keep it short.
 void encoderISR()
 {
     const uint8_t currentState =
@@ -103,10 +83,9 @@ void encoderISR()
 // =====================================================
 // DRV8871 MOTOR OUTPUT
 // =====================================================
-// DRV8871 control:
-//   Forward: IN1 LOW, PWM on IN2
-//   Reverse: IN2 LOW, PWM on IN1
-//   Stop:    IN1 LOW, IN2 LOW
+// Forward: IN1 LOW, PWM on IN2
+// Reverse: IN2 LOW, PWM on IN1
+// Stop:    both LOW
 void setMotor(float command)
 {
     const int pwm = constrain(static_cast<int>(fabs(command)), 0, 255);
@@ -131,14 +110,151 @@ void setMotor(float command)
 }
 
 // =====================================================
-// NON-BLOCKING SERIAL TARGET INPUT
+// SERIAL COMMANDS
 // =====================================================
-// A complete numeric command is accepted when Enter sends a newline. This
-// avoids Serial.parseFloat() accidentally interpreting a leftover line ending
-// as a new zero-RPM command.
-bool readTargetRPM(float &newTargetRPM)
+bool parseNumber(const char *text, float &value)
 {
-    static char inputBuffer[24];
+    char *parseEnd = nullptr;
+    const float parsedValue = static_cast<float>(strtod(text, &parseEnd));
+
+    if (parseEnd == text)
+    {
+        return false;
+    }
+
+    while (*parseEnd == ' ' || *parseEnd == '\t')
+    {
+        ++parseEnd;
+    }
+
+    if (*parseEnd != '\0')
+    {
+        return false;
+    }
+
+    value = parsedValue;
+    return true;
+}
+
+void setTargetRPM(float newTargetRPM)
+{
+    targetOutputRPM = newTargetRPM;
+    integralError = 0.0f;
+
+    Serial.print("ACK RPM=");
+    Serial.println(targetOutputRPM, 3);
+}
+
+void printControllerStatus()
+{
+    Serial.print("STATUS Trial=");
+    Serial.print(trialNumber);
+    Serial.print(" P=");
+    Serial.print(controllerP, 5);
+    Serial.print(" I=");
+    Serial.print(controllerI, 5);
+    Serial.print(" Target=");
+    Serial.println(targetOutputRPM, 3);
+}
+
+void processSerialCommand(char *command)
+{
+    if (strcmp(command, "STOP") == 0)
+    {
+        setTargetRPM(0.0f);
+        setMotor(0.0f);
+        Serial.println("ACK STOP");
+        return;
+    }
+
+    if (strcmp(command, "STATUS") == 0)
+    {
+        printControllerStatus();
+        return;
+    }
+
+    char *equalsSign = strchr(command, '=');
+    if (equalsSign != nullptr)
+    {
+        *equalsSign = '\0';
+        const char *key = command;
+        const char *valueText = equalsSign + 1;
+
+        float value = 0.0f;
+        if (!parseNumber(valueText, value))
+        {
+            Serial.println("ERR INVALID_NUMBER");
+            return;
+        }
+
+        if (strcmp(key, "P") == 0 || strcmp(key, "KP") == 0)
+        {
+            if (value < MIN_P_GAIN || value > MAX_P_GAIN)
+            {
+                Serial.println("ERR P_OUT_OF_RANGE");
+                return;
+            }
+
+            controllerP = value;
+            integralError = 0.0f;
+            Serial.print("ACK P=");
+            Serial.println(controllerP, 5);
+            return;
+        }
+
+        if (strcmp(key, "I") == 0 || strcmp(key, "KI") == 0)
+        {
+            if (value < MIN_I_GAIN || value > MAX_I_GAIN)
+            {
+                Serial.println("ERR I_OUT_OF_RANGE");
+                return;
+            }
+
+            controllerI = value;
+            integralError = 0.0f;
+            Serial.print("ACK I=");
+            Serial.println(controllerI, 5);
+            return;
+        }
+
+        if (strcmp(key, "RPM") == 0 || strcmp(key, "TARGET") == 0)
+        {
+            setTargetRPM(value);
+            return;
+        }
+
+        if (strcmp(key, "TRIAL") == 0)
+        {
+            if (value < 0.0f)
+            {
+                Serial.println("ERR TRIAL_OUT_OF_RANGE");
+                return;
+            }
+
+            trialNumber = static_cast<unsigned long>(value);
+            Serial.print("ACK TRIAL=");
+            Serial.println(trialNumber);
+            return;
+        }
+
+        Serial.println("ERR UNKNOWN_COMMAND");
+        return;
+    }
+
+    // A plain number remains a valid target command for backward compatibility.
+    float numericTarget = 0.0f;
+    if (parseNumber(command, numericTarget))
+    {
+        setTargetRPM(numericTarget);
+        return;
+    }
+
+    Serial.println("ERR UNKNOWN_COMMAND");
+}
+
+void readSerialCommands()
+{
+    static char inputBuffer[48];
     static uint8_t inputIndex = 0;
 
     while (Serial.available() > 0)
@@ -154,30 +270,13 @@ bool readTargetRPM(float &newTargetRPM)
         {
             inputBuffer[inputIndex] = '\0';
 
-            if (inputIndex == 0)
+            if (inputIndex > 0)
             {
-                return false;
+                processSerialCommand(inputBuffer);
             }
 
-            char *parseEnd = nullptr;
-
-            // AVR-LibC in the installed PlatformIO AVR toolchain exposes
-            // strtod(), while strtof() is not declared. AVR double and float
-            // use the same 32-bit representation, so this cast loses no
-            // additional precision on the ATmega2560.
-            const float parsedValue =
-                static_cast<float>(strtod(inputBuffer, &parseEnd));
-
-            const bool validNumber = (parseEnd != inputBuffer);
             inputIndex = 0;
-
-            if (validNumber)
-            {
-                newTargetRPM = parsedValue;
-                return true;
-            }
-
-            return false;
+            continue;
         }
 
         if (inputIndex < sizeof(inputBuffer) - 1)
@@ -186,46 +285,32 @@ bool readTargetRPM(float &newTargetRPM)
         }
         else
         {
-            // Discard an overlength command instead of overflowing the buffer.
             inputIndex = 0;
+            Serial.println("ERR COMMAND_TOO_LONG");
         }
     }
-
-    return false;
 }
 
 // =====================================================
-// ARDUINO STARTUP
+// STARTUP
 // =====================================================
 void setup()
 {
     Serial.begin(115200);
 
-    // Internal pull-ups provide defined encoder input states at startup.
     pinMode(ENC_A_PIN, INPUT_PULLUP);
     pinMode(ENC_B_PIN, INPUT_PULLUP);
-
     pinMode(MOTOR_IN1_PIN, OUTPUT);
     pinMode(MOTOR_IN2_PIN, OUTPUT);
 
-    // Force a stopped state before enabling the encoder interrupts.
     setMotor(0.0f);
 
     previousEncoderState =
         (static_cast<uint8_t>(digitalRead(ENC_A_PIN)) << 1) |
         static_cast<uint8_t>(digitalRead(ENC_B_PIN));
 
-    attachInterrupt(
-        digitalPinToInterrupt(ENC_A_PIN),
-        encoderISR,
-        CHANGE
-    );
-
-    attachInterrupt(
-        digitalPinToInterrupt(ENC_B_PIN),
-        encoderISR,
-        CHANGE
-    );
+    attachInterrupt(digitalPinToInterrupt(ENC_A_PIN), encoderISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENC_B_PIN), encoderISR, CHANGE);
 
     previousControlTime = millis();
 
@@ -233,7 +318,8 @@ void setup()
     Serial.print("Firmware: ");
     Serial.println(FIRMWARE_VERSION);
     Serial.println("Direction reversal guard: ON");
-    Serial.println("Send target output RPM and press Enter");
+    Serial.println("Commands: P=<gain>, I=<gain>, RPM=<target>, TRIAL=<n>, STOP, STATUS");
+    printControllerStatus();
 }
 
 // =====================================================
@@ -241,130 +327,115 @@ void setup()
 // =====================================================
 void loop()
 {
-    // Read a new setpoint without blocking the controller timing.
-    float newTargetRPM = 0.0f;
-    if (readTargetRPM(newTargetRPM))
-    {
-        targetOutputRPM = newTargetRPM;
-
-        // Prevent integral history from one test carrying into the next test.
-        integralError = 0.0f;
-
-        Serial.print("New target output RPM: ");
-        Serial.println(targetOutputRPM);
-    }
+    readSerialCommands();
 
     const uint32_t now = millis();
-
-    if (now - previousControlTime >= CONTROL_INTERVAL_MS)
+    if (now - previousControlTime < CONTROL_INTERVAL_MS)
     {
-        // Use the actual elapsed time to reduce sensitivity to loop jitter.
-        const float dt =
-            static_cast<float>(now - previousControlTime) / 1000.0f;
+        return;
+    }
 
-        previousControlTime = now;
+    const float dt =
+        static_cast<float>(now - previousControlTime) / 1000.0f;
+    previousControlTime = now;
 
-        // Copy the multi-byte encoder count atomically on the 8-bit ATmega2560.
-        noInterrupts();
-        const long currentCount = encoderCount;
-        interrupts();
+    noInterrupts();
+    const long currentCount = encoderCount;
+    interrupts();
 
-        const long deltaCount = currentCount - previousEncoderCount;
-        previousEncoderCount = currentCount;
+    const long deltaCount = currentCount - previousEncoderCount;
+    previousEncoderCount = currentCount;
 
-        // Convert encoder movement to motor RPM, then account for the gearbox.
-        const float motorRPM =
-            ENCODER_DIRECTION_SIGN *
-            (static_cast<float>(deltaCount) / COUNTS_PER_MOTOR_REV) *
-            (60.0f / dt);
+    const float motorRPM =
+        ENCODER_DIRECTION_SIGN *
+        (static_cast<float>(deltaCount) / COUNTS_PER_MOTOR_REV) *
+        (60.0f / dt);
 
-        measuredOutputRPM = motorRPM / GEAR_RATIO;
+    measuredOutputRPM = motorRPM / GEAR_RATIO;
+    const float error = targetOutputRPM - measuredOutputRPM;
 
-        // PI controller error is based on gearbox output-shaft speed.
-        const float error = targetOutputRPM - measuredOutputRPM;
+    const float proposedIntegral = constrain(
+        integralError + error * dt,
+        -INTEGRAL_LIMIT,
+        INTEGRAL_LIMIT
+    );
 
-        // Propose a new integral value, but accept it only if the resulting
-        // command is not saturated and does not request an active reversal.
-        const float proposedIntegral = constrain(
-            integralError + error * dt,
-            -INTEGRAL_LIMIT,
-            INTEGRAL_LIMIT
-        );
+    const float proposedCommand =
+        controllerP * error + controllerI * proposedIntegral;
 
-        const float proposedCommand =
-            KP * error + KI * proposedIntegral;
+    const bool withinPwmRange =
+        proposedCommand < 255.0f && proposedCommand > -255.0f;
 
-        const bool withinPwmRange =
-            proposedCommand < 255.0f && proposedCommand > -255.0f;
-
-        bool directionAllowed = true;
-        if (PREVENT_ACTIVE_DIRECTION_REVERSAL)
+    bool directionAllowed = true;
+    if (PREVENT_ACTIVE_DIRECTION_REVERSAL)
+    {
+        if (targetOutputRPM > 0.0f && proposedCommand < 0.0f)
         {
-            if (targetOutputRPM > 0.0f && proposedCommand < 0.0f)
-            {
-                directionAllowed = false;
-            }
-            else if (targetOutputRPM < 0.0f && proposedCommand > 0.0f)
-            {
-                directionAllowed = false;
-            }
+            directionAllowed = false;
         }
-
-        if (withinPwmRange && directionAllowed)
+        else if (targetOutputRPM < 0.0f && proposedCommand > 0.0f)
         {
-            integralError = proposedIntegral;
+            directionAllowed = false;
         }
+    }
 
-        float motorCommand = KP * error + KI * integralError;
+    if (withinPwmRange && directionAllowed)
+    {
+        integralError = proposedIntegral;
+    }
 
-        if (fabs(targetOutputRPM) < 0.01f)
+    float motorCommand =
+        controllerP * error + controllerI * integralError;
+
+    if (fabs(targetOutputRPM) < 0.01f)
+    {
+        motorCommand = 0.0f;
+        integralError = 0.0f;
+    }
+    else if (PREVENT_ACTIVE_DIRECTION_REVERSAL)
+    {
+        if (targetOutputRPM > 0.0f)
         {
-            // A zero target always stops the driver and clears stored error.
-            motorCommand = 0.0f;
-            integralError = 0.0f;
-        }
-        else if (PREVENT_ACTIVE_DIRECTION_REVERSAL)
-        {
-            if (targetOutputRPM > 0.0f)
-            {
-                // Positive-speed control may drive forward or coast, never reverse.
-                motorCommand = constrain(motorCommand, 0.0f, 255.0f);
-            }
-            else
-            {
-                // Negative-speed control may drive reverse or coast, never forward.
-                motorCommand = constrain(motorCommand, -255.0f, 0.0f);
-            }
+            motorCommand = constrain(motorCommand, 0.0f, 255.0f);
         }
         else
         {
-            motorCommand = constrain(motorCommand, -255.0f, 255.0f);
+            motorCommand = constrain(motorCommand, -255.0f, 0.0f);
         }
+    }
+    else
+    {
+        motorCommand = constrain(motorCommand, -255.0f, 255.0f);
+    }
 
-        setMotor(motorCommand);
+    setMotor(motorCommand);
 
-        // Print approximately ten rows per second for testing and JMP import.
-        static uint8_t printDivider = 0;
-        if (++printDivider >= 5)
-        {
-            printDivider = 0;
+    static uint8_t printDivider = 0;
+    if (++printDivider >= PRINT_DIVIDER)
+    {
+        printDivider = 0;
 
-            Serial.print("Target=");
-            Serial.print(targetOutputRPM);
-            Serial.print(" OutRPM=");
-            Serial.print(measuredOutputRPM, 2);
-            Serial.print(" MotorRPM=");
-            Serial.print(motorRPM, 1);
-            Serial.print(" Error=");
-            Serial.print(error, 2);
-            Serial.print(" Integral=");
-            Serial.print(integralError, 2);
-            Serial.print(" Counts=");
-            Serial.print(currentCount);
-            Serial.print(" dC=");
-            Serial.print(deltaCount);
-            Serial.print(" PWM=");
-            Serial.println(motorCommand, 1);
-        }
+        Serial.print("Trial=");
+        Serial.print(trialNumber);
+        Serial.print(" P=");
+        Serial.print(controllerP, 5);
+        Serial.print(" I=");
+        Serial.print(controllerI, 5);
+        Serial.print(" Target=");
+        Serial.print(targetOutputRPM, 2);
+        Serial.print(" OutRPM=");
+        Serial.print(measuredOutputRPM, 2);
+        Serial.print(" MotorRPM=");
+        Serial.print(motorRPM, 1);
+        Serial.print(" Error=");
+        Serial.print(error, 2);
+        Serial.print(" Integral=");
+        Serial.print(integralError, 2);
+        Serial.print(" Counts=");
+        Serial.print(currentCount);
+        Serial.print(" dC=");
+        Serial.print(deltaCount);
+        Serial.print(" PWM=");
+        Serial.println(motorCommand, 1);
     }
 }
