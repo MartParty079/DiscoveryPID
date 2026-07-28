@@ -46,6 +46,12 @@ const uint32_t CONTROL_INTERVAL_MS = 20;
 // Additional limit on stored integral error.
 const float INTEGRAL_LIMIT = 300.0f;
 
+// During normal speed regulation, a positive target may only command forward
+// drive or coast. A negative target may only command reverse drive or coast.
+// This prevents the PI controller from rapidly reversing the motor to correct
+// overshoot, which is unsafe and creates large encoder/RPM spikes.
+const bool PREVENT_ACTIVE_DIRECTION_REVERSAL = true;
+
 // =====================================================
 // ENCODER STATE
 // =====================================================
@@ -271,7 +277,7 @@ void loop()
         const float error = targetOutputRPM - measuredOutputRPM;
 
         // Propose a new integral value, but accept it only if the resulting
-        // command is not saturated. This is conditional integral anti-windup.
+        // command is not saturated and does not request an active reversal.
         const float proposedIntegral = constrain(
             integralError + error * dt,
             -INTEGRAL_LIMIT,
@@ -281,13 +287,52 @@ void loop()
         const float proposedCommand =
             KP * error + KI * proposedIntegral;
 
-        if (proposedCommand < 255.0f && proposedCommand > -255.0f)
+        const bool withinPwmRange =
+            proposedCommand < 255.0f && proposedCommand > -255.0f;
+
+        bool directionAllowed = true;
+        if (PREVENT_ACTIVE_DIRECTION_REVERSAL)
+        {
+            if (targetOutputRPM > 0.0f && proposedCommand < 0.0f)
+            {
+                directionAllowed = false;
+            }
+            else if (targetOutputRPM < 0.0f && proposedCommand > 0.0f)
+            {
+                directionAllowed = false;
+            }
+        }
+
+        if (withinPwmRange && directionAllowed)
         {
             integralError = proposedIntegral;
         }
 
         float motorCommand = KP * error + KI * integralError;
-        motorCommand = constrain(motorCommand, -255.0f, 255.0f);
+
+        if (fabs(targetOutputRPM) < 0.01f)
+        {
+            // A zero target always stops the driver and clears stored error.
+            motorCommand = 0.0f;
+            integralError = 0.0f;
+        }
+        else if (PREVENT_ACTIVE_DIRECTION_REVERSAL)
+        {
+            if (targetOutputRPM > 0.0f)
+            {
+                // Positive-speed control may drive forward or coast, never reverse.
+                motorCommand = constrain(motorCommand, 0.0f, 255.0f);
+            }
+            else
+            {
+                // Negative-speed control may drive reverse or coast, never forward.
+                motorCommand = constrain(motorCommand, -255.0f, 0.0f);
+            }
+        }
+        else
+        {
+            motorCommand = constrain(motorCommand, -255.0f, 255.0f);
+        }
 
         setMotor(motorCommand);
 
