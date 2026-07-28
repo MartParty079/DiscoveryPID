@@ -45,7 +45,7 @@ const float KP = 2.0f;
 const float KI = 5.0f;
 
 // 20 ms gives a nominal 50 Hz controller update rate.
-const uint32_t CONTROL_INTERVAL_MS = 20;
+const uint32_t CONTROL_INTERVAL_MS = 10;
 
 // Additional limit on stored integral error.
 const float INTEGRAL_LIMIT = 300.0f;
@@ -76,7 +76,7 @@ const int8_t QUADRATURE_TABLE[16] = {
 // CONTROLLER STATE
 // =====================================================
 // Start at zero so the motor cannot begin moving immediately after reset.
-float targetOutputRPM = 0.0f;
+float targetOutputRPM = 100.0f;
 float measuredOutputRPM = 0.0f;
 float integralError = 0.0f;
 
