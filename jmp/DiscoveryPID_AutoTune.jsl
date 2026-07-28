@@ -1,0 +1,427 @@
+// DiscoveryPID_AutoTune.jsl
+// JMP Pro 19+ Bayesian optimization loop for the DiscoveryPID motor controller.
+//
+// JMP/JSL owns the experiment loop. Python owns the serial connection, safety
+// checks, raw data capture, and calculation of one Error value per run.
+
+Names Default To Here( 1 );
+
+// ============================================================================
+// USER SETTINGS
+// ============================================================================
+portName = "COM7";
+targetRPM = 100;
+trialDurationSeconds = 30;
+warmupSeconds = 2;
+smoothingSamples = 5;
+
+pLow = 0.50;
+pHigh = 2.00;
+iLow = 0.50;
+iHigh = 5.00;
+
+maximumBayesianRuns = 10;
+goalErrorRPM = 2.50;
+supervisedMode = 1; // 1 = confirm every physical run; 0 = run without prompts.
+
+// The script is stored in <repository>/jmp. Convert File Path("", ...) resolves
+// to the current script directory when this saved JSL file is opened and run.
+scriptDirectory = Convert File Path( "", Absolute, Windows );
+projectDirectory = Convert File Path( scriptDirectory || "../", Absolute, Windows );
+pythonExecutable = "py.exe";
+workerScript = projectDirectory || "tools/run_pid_trial.py";
+workingTablePath = projectDirectory || "data/autotune/DiscoveryPID_Optimization.jmp";
+compactCSVPath = projectDirectory || "data/autotune/DiscoveryPID_Optimization.csv";
+historyCSVPath = projectDirectory || "data/autotune/DiscoveryPID_Response_History.csv";
+resultDirectory = projectDirectory || "data/autotune/results/";
+runDirectory = projectDirectory || "data/autotune/runs/";
+
+// Five bounded seed settings. Existing completed combinations are not repeated.
+seedSettings = {
+    {1.25, 2.75},
+    {0.50, 0.50},
+    {2.00, 0.50},
+    {0.50, 5.00},
+    {2.00, 5.00}
+};
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+ensureWorkingTable = Function( {},
+    {dt, pLimits, iLimits},
+    If( File Exists( workingTablePath ),
+        dt = Open( workingTablePath ),
+        dt = New Table(
+            "DiscoveryPID Optimization",
+            New Column( "Run", Numeric, Ordinal, Format( "Best", 12 ) ),
+            New Column( "Iteration", Numeric, Ordinal, Format( "Best", 12 ) ),
+            New Column(
+                "P",
+                Numeric,
+                Continuous,
+                Format( "Fixed Dec", 12, 5 )
+            ),
+            New Column(
+                "I",
+                Numeric,
+                Continuous,
+                Format( "Fixed Dec", 12, 5 )
+            ),
+            New Column(
+                "Error",
+                Numeric,
+                Continuous,
+                Format( "Fixed Dec", 12, 5 ),
+                Set Property(
+                    "Response Limits",
+                    {Goal( Minimize ), Importance( 1 ), Show Limits( 0 )}
+                )
+            )
+        );
+        dt << Save( workingTablePath );
+    );
+
+    // Reapply critical metadata in case the table was edited outside this script.
+    pLimits = Eval List( {pLow, pHigh} );
+    iLimits = Eval List( {iLow, iHigh} );
+    Eval( Eval Expr( Column( dt, "P" ) << Set Property( "Coding", Expr( pLimits ) ) ) );
+    Column( dt, "P" ) << Set Property( "Design Role", DesignRole( Continuous ) );
+    Column( dt, "P" ) << Set Property( "Factor Changes", Easy );
+    Eval( Eval Expr( Column( dt, "I" ) << Set Property( "Coding", Expr( iLimits ) ) ) );
+    Column( dt, "I" ) << Set Property( "Design Role", DesignRole( Continuous ) );
+    Column( dt, "I" ) << Set Property( "Factor Changes", Easy );
+    Column( dt, "Error" ) << Set Property(
+        "Response Limits",
+        {Goal( Minimize ), Importance( 1 ), Show Limits( 0 )}
+    );
+
+    dt;
+);
+
+exportCompactTable = Function( {dt},
+    {text = "P,I,Error\!N", rowIndex, pValue, iValue, errorValue},
+    For( rowIndex = 1, rowIndex <= N Rows( dt ), rowIndex++,
+        errorValue = Column( dt, "Error" )[rowIndex];
+        If( !Is Missing( errorValue ),
+            pValue = Column( dt, "P" )[rowIndex];
+            iValue = Column( dt, "I" )[rowIndex];
+            text ||= Char( pValue ) || "," || Char( iValue ) || "," ||
+                Char( errorValue ) || "\!N";
+        );
+    );
+    Save Text File( compactCSVPath, text, Mode( "Replace" ) );
+);
+
+combinationAlreadyCompleted = Function( {dt, pValue, iValue},
+    {matchingRows},
+    matchingRows = dt << Get Rows Where(
+        Abs( :P - pValue ) < 0.000001 &
+        Abs( :I - iValue ) < 0.000001 &
+        !Is Missing( :Error )
+    );
+    N Rows( matchingRows ) > 0;
+);
+
+confirmPhysicalRun = Function( {runNumber, pValue, iValue, phaseName},
+    {choice = 0},
+    If( !supervisedMode, Return( 1 ) );
+
+    New Window(
+        "DiscoveryPID Run Confirmation",
+        <<Modal,
+        V List Box(
+            Text Box(
+                phaseName || " run " || Char( runNumber ) || "\!N\!N" ||
+                "P = " || Char( pValue ) || "\!N" ||
+                "I = " || Char( iValue ) || "\!N" ||
+                "Target = " || Char( targetRPM ) || " RPM\!N\!N" ||
+                "Verify the motor is clear and the emergency power switch is accessible."
+            ),
+            H List Box(
+                Button Box(
+                    "Run Trial",
+                    choice = 1;
+                    Current Window() << Close Window;
+                ),
+                Button Box(
+                    "Stop Autotune",
+                    choice = 0;
+                    Current Window() << Close Window;
+                )
+            )
+        )
+    );
+    choice;
+);
+
+runPhysicalTrial = Function( {runNumber, pValue, iValue},
+    {resultPath, rawPath, outputText, resultDT, statusText, errorValue},
+
+    resultPath = resultDirectory || "Run_" || Char( runNumber ) || "_result.csv";
+    rawPath = runDirectory || "Run_" || Char( runNumber ) || "_response.csv";
+
+    If( File Exists( resultPath ), Delete File( resultPath ) );
+
+    outputText = Run Program(
+        Executable( pythonExecutable ),
+        Options(
+            {
+                workerScript,
+                "--port", portName,
+                "--trial", Char( runNumber ),
+                "--p", Char( pValue ),
+                "--i", Char( iValue ),
+                "--target", Char( targetRPM ),
+                "--duration", Char( trialDurationSeconds ),
+                "--warmup", Char( warmupSeconds ),
+                "--smoothing-samples", Char( smoothingSamples ),
+                "--result-file", resultPath,
+                "--raw-file", rawPath,
+                "--history-file", historyCSVPath
+            }
+        ),
+        Read Function( "text" )
+    );
+    Print( outputText );
+
+    If( !File Exists( resultPath ),
+        New Window(
+            "Trial Failed",
+            <<Modal,
+            V List Box(
+                Text Box(
+                    "Python did not create a result file.\!N\!N" ||
+                    "Check the JMP log and confirm pyserial is installed for py.exe."
+                ),
+                Button Box( "OK", Current Window() << Close Window )
+            )
+        );
+        Return( . );
+    );
+
+    resultDT = Open( resultPath, Invisible );
+    statusText = Column( resultDT, "Status" )[1];
+    errorValue = Column( resultDT, "Error" )[1];
+    Close( resultDT, No Save );
+
+    If( statusText != "COMPLETE" | Is Missing( errorValue ),
+        New Window(
+            "Trial Aborted",
+            <<Modal,
+            V List Box(
+                Text Box(
+                    "Run " || Char( runNumber ) || " did not complete.\!N" ||
+                    "Status: " || statusText || "\!N\!N" ||
+                    "The motor was commanded to stop. Review the raw response file before continuing."
+                ),
+                Button Box( "OK", Current Window() << Close Window )
+            )
+        );
+        Return( . );
+    );
+
+    errorValue;
+);
+
+nextRunNumber = Function( {dt},
+    If( N Rows( dt ) == 0,
+        1,
+        Max( Column( dt, "Run" ) << Get Values ) + 1
+    );
+);
+
+saveCompletedRun = Function( {dt, rowIndex, runNumber, iterationNumber, errorValue},
+    Column( dt, "Run" )[rowIndex] = runNumber;
+    Column( dt, "Iteration" )[rowIndex] = iterationNumber;
+    Column( dt, "Error" )[rowIndex] = errorValue;
+    dt << Save( workingTablePath );
+    exportCompactTable( dt );
+);
+
+bestError = Function( {dt},
+    {values, completed},
+    values = Column( dt, "Error" ) << Get Values;
+    completed = Loc( !Is Missing( values ) );
+    If( N Rows( completed ) == 0, ., Min( values[completed] ) );
+);
+
+// ============================================================================
+// MAIN LOOP
+// ============================================================================
+If( !File Exists( workerScript ),
+    Throw( "Missing Python worker: " || workerScript )
+);
+
+dt = ensureWorkingTable();
+Current Data Table( dt );
+stopRequested = 0;
+
+// Seed stage. JSL loops over the initial bounded design and skips combinations
+// that are already complete in the working table.
+For( seedIndex = 1, seedIndex <= N Items( seedSettings ), seedIndex++,
+    pSeed = seedSettings[seedIndex][1];
+    iSeed = seedSettings[seedIndex][2];
+
+    If( !combinationAlreadyCompleted( dt, pSeed, iSeed ),
+        runNumber = nextRunNumber( dt );
+        If( !confirmPhysicalRun( runNumber, pSeed, iSeed, "Seed" ),
+            stopRequested = 1;
+            Break();
+        );
+
+        errorScore = runPhysicalTrial( runNumber, pSeed, iSeed );
+        If( Is Missing( errorScore ),
+            stopRequested = 1;
+            Break();
+        );
+
+        dt << Add Rows( 1 );
+        newRow = N Rows( dt );
+        Column( dt, "P" )[newRow] = pSeed;
+        Column( dt, "I" )[newRow] = iSeed;
+        saveCompletedRun( dt, newRow, runNumber, 0, errorScore );
+    );
+);
+
+// Bayesian stage. JMP generates and appends one candidate row. JSL sends that
+// P/I combination to the controller, reads the one-row result, fills Error, and
+// relaunches Bayesian Optimization for the next iteration.
+If( !stopRequested,
+    For( bayesIteration = 1, bayesIteration <= maximumBayesianRuns, bayesIteration++,
+        currentBest = bestError( dt );
+        If( !Is Missing( currentBest ) & currentBest <= goalErrorRPM,
+            Print(
+                "Stopping: best Error " || Char( currentBest ) ||
+                " RPM reached the goal of " || Char( goalErrorRPM ) || " RPM."
+            );
+            Break();
+        );
+
+        runNumber = nextRunNumber( dt );
+        rowsBefore = N Rows( dt );
+        bo = dt << Bayesian Optimization(
+            Y( :Error ),
+            X( :P, :I ),
+            Iteration( :Iteration ),
+            Run Order( :Run ),
+            Generate Candidate Set(
+                Candidate Set Size( 2000 ),
+                Include Runs that Do Not Conform to Constraints( 0 )
+            ),
+            Autoselect Batch(
+                Batch Size( 1 ),
+                Minimum RSquare( 0.50 )
+            ),
+            Make Table Options(
+                Location( 1 ),
+                Randomize Runs( 0 ),
+                Save desirability function values to columns( 0 ),
+                Save startup script for next batch selection to data table( 0 ),
+                Include observed desirabilities( 0 ),
+                Include original candidate set row indices( 0 ),
+                Include reason added column( 0 ),
+                Include predicted response values( 0 ),
+                Include prediction standard deviations( 0 ),
+                Include Bayesian desirability expected improvement column( 0 )
+            )
+        );
+
+        bo << Make Table;
+        Wait( 0.2 );
+        Report( bo ) << Close Window;
+
+        If( N Rows( dt ) <= rowsBefore,
+            New Window(
+                "Bayesian Optimization Error",
+                <<Modal,
+                V List Box(
+                    Text Box(
+                        "JMP did not append a candidate row.\!N" ||
+                        "Confirm that this is JMP Pro 19 or newer and that Location(1) is set to append."
+                    ),
+                    Button Box( "OK", Current Window() << Close Window )
+                )
+            );
+            Break();
+        );
+
+        newRow = N Rows( dt );
+        proposedP = Column( dt, "P" )[newRow];
+        proposedI = Column( dt, "I" )[newRow];
+
+        If( !confirmPhysicalRun( runNumber, proposedP, proposedI, "Bayesian" ),
+            dt << Delete Rows( newRow );
+            dt << Save( workingTablePath );
+            stopRequested = 1;
+            Break();
+        );
+
+        errorScore = runPhysicalTrial( runNumber, proposedP, proposedI );
+        If( Is Missing( errorScore ),
+            dt << Delete Rows( newRow );
+            dt << Save( workingTablePath );
+            stopRequested = 1;
+            Break();
+        );
+
+        saveCompletedRun(
+            dt,
+            newRow,
+            runNumber,
+            bayesIteration,
+            errorScore
+        );
+    );
+);
+
+// ============================================================================
+// FINAL REPORTS
+// ============================================================================
+exportCompactTable( dt );
+dt << Bring Window To Front;
+
+If( N Rows( dt ) > 0,
+    dt << Graph Builder(
+        Size( 700, 450 ),
+        Show Control Panel( 0 ),
+        Variables( X( :Run ), Y( :Error ) ),
+        Elements( Points( X, Y, Legend( 3 ) ), Line( X, Y, Legend( 5 ) ) ),
+        SendToReport(
+            Dispatch( {}, "graph title", TextEditBox, {Set Text( "PI Autotuning Error by Run" )} )
+        )
+    );
+);
+
+If( File Exists( historyCSVPath ),
+    historyDT = Open( historyCSVPath );
+    historyDT << Graph Builder(
+        Size( 850, 500 ),
+        Show Control Panel( 0 ),
+        Variables(
+            X( :"Elapsed Time (s)"n ),
+            Y( :"Output RPM"n ),
+            Overlay( :Run )
+        ),
+        Elements( Line( X, Y, Legend( 6 ) ) ),
+        SendToReport(
+            Dispatch( {}, "graph title", TextEditBox, {Set Text( "Output RPM vs. Time by Run" )} )
+        )
+    );
+);
+
+currentBest = bestError( dt );
+New Window(
+    "DiscoveryPID Autotune Complete",
+    <<Modal,
+    V List Box(
+        Text Box(
+            "The JSL loop has stopped.\!N\!N" ||
+            "Completed runs: " || Char( N Rows( dt ) ) || "\!N" ||
+            "Best Error: " || If( Is Missing( currentBest ), "N/A", Char( currentBest ) ) || " RPM\!N\!N" ||
+            "Compact table: " || compactCSVPath || "\!N" ||
+            "Response history: " || historyCSVPath
+        ),
+        Button Box( "OK", Current Window() << Close Window )
+    )
+);
