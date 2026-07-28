@@ -150,7 +150,14 @@ bool readTargetRPM(float &newTargetRPM)
             }
 
             char *parseEnd = nullptr;
-            const float parsedValue = strtof(inputBuffer, &parseEnd);
+
+            // AVR-LibC in the installed PlatformIO AVR toolchain exposes
+            // strtod(), while strtof() is not declared. AVR double and float
+            // use the same 32-bit representation, so this cast loses no
+            // additional precision on the ATmega2560.
+            const float parsedValue =
+                static_cast<float>(strtod(inputBuffer, &parseEnd));
+
             const bool validNumber = (parseEnd != inputBuffer);
             inputIndex = 0;
 
