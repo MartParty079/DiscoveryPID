@@ -1,0 +1,37 @@
+name: Trim human telemetry
+
+on:
+  push:
+    branches:
+      - position-hold-bayesian-v1
+    paths:
+      - .trim-human-telemetry-trigger
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: position-hold-bayesian-v1
+          fetch-depth: 0
+      - shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/main.cpp')
+          s = p.read_text()
+          old = '''        const bool worthShowing =\n            mode == Mode::CALIBRATING ||\n            mode == Mode::FAULT ||\n            fabsf(positionErrorDeg) >= 0.9f ||\n            fabsf(measuredOutputRPM) >= 1.0f ||\n            fabsf(appliedMotorCommand) >= 1.0f;\n'''
+          new = '''        const bool worthShowing =\n            fabsf(positionErrorDeg) >= 0.9f ||\n            fabsf(measuredOutputRPM) >= 1.0f ||\n            fabsf(appliedMotorCommand) >= 1.0f;\n'''
+          assert old in s
+          p.write_text(s.replace(old, new))
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/trim-human-telemetry.yml .trim-human-telemetry-trigger
+          git add src/main.cpp
+          git commit -m "Make human telemetry quiet at rest"
+          git push origin HEAD:position-hold-bayesian-v1
