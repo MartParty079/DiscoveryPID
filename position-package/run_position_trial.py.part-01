@@ -1,0 +1,192 @@
+   f"Run={a.trial} "
+        f"KP={a.kp:.6g} "
+        f"KI={a.ki:.6g} "
+        f"KD={a.kd:.6g} "
+        f"Score={score:.6f} "
+        f"Success={success} "
+        f"Status={status}",
+        flush=True,
+    )
+
+    return 0 if status in {"COMPLETE", "TEST_TIMEOUT", "TEST_PREP_TIMEOUT"} else 4
+
+
+def main() -> int:
+    a = arguments()
+
+    if not (
+        a.trial >= 1
+        and 0.0 <= a.kp <= 3.0
+        and 0.0 <= a.ki <= 1.0
+        and 0.0 <= a.kd <= 0.20
+        and 5.0 <= abs(a.test_offset) <= 30.0
+        and a.overall_timeout > 5.0
+    ):
+        print("Invalid trial arguments", file=sys.stderr)
+        return 2
+
+    a.raw_file.parent.mkdir(parents=True, exist_ok=True)
+    a.result_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if a.result_file.exists():
+        a.result_file.unlink()
+
+    rows: list[dict[str, float | str]] = []
+    firmware = ""
+    status = "FAILED"
+    port: serial.Serial | None = None
+
+    try:
+        port = open_without_reset(a.port, a.baud)
+        firmware = identify(port, a.expected_firmware)
+        configure(port, a)
+
+        port.reset_input_buffer()
+        send(port, f"TEST={a.test_offset:.8g}")
+        wait_for_ack(port, "ACK TEST=", a.test_offset, timeout=2.0)
+
+        start = time.monotonic()
+        return_start: float | None = None
+        test_complete = False
+
+        while time.monotonic() - start < a.overall_timeout:
+            line = port.readline().decode(
+                "utf-8",
+                errors="replace",
+            ).strip()
+
+            if not line:
+                continue
+
+            print(line, flush=True)
+
+            if line == "EVENT TEST_RETURN":
+                return_start = time.monotonic()
+                continue
+
+            if line == "EVENT TEST_COMPLETE":
+                status = "COMPLETE"
+                test_complete = True
+                break
+
+            if line == "EVENT TEST_TIMEOUT":
+                status = "TEST_TIMEOUT"
+                test_complete = True
+                break
+
+            if line == "EVENT TEST_PREP_TIMEOUT":
+                status = "TEST_PREP_TIMEOUT"
+                test_complete = True
+                break
+
+            if line.startswith("EVENT FAULT"):
+                status = line.replace("EVENT ", "", 1).replace(" ", "_")
+                raise RuntimeError(line)
+
+            values = telemetry(line)
+            if values is None:
+                continue
+
+            if int(values["Trial"]) != a.trial:
+                raise RuntimeError("Telemetry trial mismatch")
+
+            for key, expected in (
+                ("KP", a.kp),
+                ("KI", a.ki),
+                ("KD", a.kd),
+            ):
+                if not math.isclose(
+                    values[key],
+                    expected,
+                    abs_tol=1e-4,
+                ):
+                    raise RuntimeError(
+                        f"Telemetry {key} mismatch"
+                    )
+
+            if int(values["Homed"]) != 1:
+                raise RuntimeError("Controller lost home state")
+
+            position = values["PosDeg"]
+            rpm = values["OutRPM"]
+            pwm = values["PWM"]
+
+            if abs(position) > a.max_position_deg:
+                status = "ABORT_MAX_POSITION"
+                raise RuntimeError(status)
+
+            if abs(rpm) > a.max_output_rpm:
+                status = "ABORT_MAX_OUTPUT_RPM"
+                raise RuntimeError(status)
+
+            if abs(pwm) > a.max_pwm + 0.5:
+                status = "ABORT_MAX_PWM"
+                raise RuntimeError(status)
+
+            now = time.monotonic()
+            elapsed = now - start
+
+            rows.append(
+                {
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%S"
+                    ),
+                    "elapsed": elapsed,
+                    "return_time": (
+                        -1.0
+                        if return_start is None
+                        else now - return_start
+                    ),
+                    "trial": float(a.trial),
+                    "mode": values["Mode"],
+                    "kp": a.kp,
+                    "ki": a.ki,
+                    "kd": a.kd,
+                    "position": position,
+                    "target": values["PosTarget"],
+                    "error": values["PosError"],
+                    "speed_target": values["SpeedTarget"],
+                    "rpm": rpm,
+                    "counts": values["Counts"],
+                    "pwm": pwm,
+                    "raw": line,
+                }
+            )
+
+        if not test_complete:
+            status = "WORKER_TIMEOUT"
+
+    except (SerialException, OSError, RuntimeError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr, flush=True)
+
+    except KeyboardInterrupt:
+        status = "ABORT_USER"
+
+    finally:
+        if port is not None:
+            try:
+                send(port, "HOLD")
+            except (SerialException, OSError):
+                pass
+            port.close()
+
+    write_raw(a.raw_file, rows)
+    append_history(
+        a.history_file,
+        a.trial,
+        a.kp,
+        a.ki,
+        a.kd,
+        rows,
+    )
+
+    return write_result(
+        a,
+        firmware,
+        status,
+        rows,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
