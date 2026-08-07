@@ -1,4 +1,4 @@
-name: Assemble position-hold package
+name: Assemble and clean position-hold package
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
           ref: position-hold-bayesian
           fetch-depth: 0
 
-      - name: Assemble source files
+      - name: Assemble and validate source files
         shell: bash
         run: |
           set -euo pipefail
@@ -31,16 +31,18 @@ jobs:
           cat position-package/README.txt.part-* > docs/position_hold/README.txt
           python -m py_compile tools/run_position_trial.py
 
-      - name: Commit assembled package
+      - name: Commit final organized branch
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf position-package
+          rm -f .github/workflows/assemble-position-package.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/main.cpp tools/run_position_trial.py jmp/DiscoveryPID_Position_Bayesian.jsl docs/position_hold/README.txt
+          git add -A
           if git diff --cached --quiet; then
-            echo "No assembled file changes"
+            echo "No changes"
           else
-            git commit -m "Add position hold and JMP Bayesian tuning"
+            git commit -m "Finalize organized position hold branch"
             git push origin HEAD:position-hold-bayesian
           fi
