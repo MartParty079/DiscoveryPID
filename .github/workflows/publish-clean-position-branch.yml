@@ -1,0 +1,50 @@
+name: Publish clean position branch
+
+on:
+  push:
+    branches:
+      - position-hold-bayesian
+    paths:
+      - publish-position-v1/READY
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out assembled source branch
+        uses: actions/checkout@v4
+        with:
+          ref: position-hold-bayesian
+          fetch-depth: 0
+
+      - name: Preserve the four final files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/position-v1/src /tmp/position-v1/tools /tmp/position-v1/jmp /tmp/position-v1/docs/position_hold
+          cp src/main.cpp /tmp/position-v1/src/main.cpp
+          cp tools/run_position_trial.py /tmp/position-v1/tools/run_position_trial.py
+          cp jmp/DiscoveryPID_Position_Bayesian.jsl /tmp/position-v1/jmp/DiscoveryPID_Position_Bayesian.jsl
+          cp docs/position_hold/README.txt /tmp/position-v1/docs/position_hold/README.txt
+          python -m py_compile /tmp/position-v1/tools/run_position_trial.py
+          rm -rf /tmp/position-v1/tools/__pycache__
+
+      - name: Create one-commit clean branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin jmp-autotune
+          git switch -C position-hold-bayesian-v1 origin/jmp-autotune
+          mkdir -p src tools jmp docs/position_hold
+          cp /tmp/position-v1/src/main.cpp src/main.cpp
+          cp /tmp/position-v1/tools/run_position_trial.py tools/run_position_trial.py
+          cp /tmp/position-v1/jmp/DiscoveryPID_Position_Bayesian.jsl jmp/DiscoveryPID_Position_Bayesian.jsl
+          cp /tmp/position-v1/docs/position_hold/README.txt docs/position_hold/README.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.cpp tools/run_position_trial.py jmp/DiscoveryPID_Position_Bayesian.jsl docs/position_hold/README.txt
+          git commit -m "Add position hold with JMP Bayesian PID tuning"
+          git push origin HEAD:position-hold-bayesian-v1
