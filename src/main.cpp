@@ -1294,8 +1294,6 @@ void loop()
     else if (telemetryMode == TelemetryMode::HUMAN)
     {
         const bool worthShowing =
-            mode == Mode::CALIBRATING ||
-            mode == Mode::FAULT ||
             fabsf(positionErrorDeg) >= 0.9f ||
             fabsf(measuredOutputRPM) >= 1.0f ||
             fabsf(appliedMotorCommand) >= 1.0f;
