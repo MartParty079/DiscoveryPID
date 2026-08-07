@@ -114,7 +114,7 @@ maximumBayesianRuns =
 // ============================================================================
 
 quoteArgument = Function( {value},
-    "\!\"" || Char( value ) || "\!\""
+    "\!"" || Char( value ) || "\!""
 );
 
 showFatalError = Function( {messageText},
@@ -601,7 +601,7 @@ Function( {runNumber, kpValue, kiValue, kdValue},
     batchText =
         "@echo off\!N" ||
 
-        quoteArgument( pythonExecutable ) || " " ||
+        quoteArgument( pythonExecutabable ) || " " ||
         quoteArgument( workerScript ) || " " ||
 
         "--port " || quoteArgument( portName ) || " " ||
