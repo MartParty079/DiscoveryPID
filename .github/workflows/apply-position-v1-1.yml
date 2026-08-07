@@ -1,0 +1,94 @@
+name: Apply position hold v1.1
+
+on:
+  push:
+    branches:
+      - position-hold-bayesian-v1
+    paths:
+      - .position-v1-1-trigger
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: position-hold-bayesian-v1
+          fetch-depth: 0
+
+      - name: Patch firmware and worker
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/main.cpp')
+          s = p.read_text()
+          s = s.replace('DiscoveryPID position-hold-v1 2026-08-06', 'DiscoveryPID position-hold-v1.1 2026-08-07')
+          s = s.replace('float positionKp = 0.80f;\nfloat positionKi = 0.05f;\nfloat positionKd = 0.025f;', 'float positionKp = 0.40f;\nfloat positionKi = 0.00f;\nfloat positionKd = 0.050f;')
+          s = s.replace('float maximumReturnRPM = 35.0f;', 'float maximumReturnRPM = 15.0f;')
+
+          old = 'constexpr uint32_t CONTROL_INTERVAL_MS = 10;\nconstexpr uint8_t TELEMETRY_DIVIDER = 10;  // About 10 rows/second.\n'
+          new = '''constexpr uint32_t CONTROL_INTERVAL_MS = 10;\nconstexpr uint8_t TELEMETRY_DIVIDER = 10;  // FAST mode: about 10 rows/second.\nconstexpr uint8_t HUMAN_TELEMETRY_DIVIDER = 50; // HUMAN mode: about 2 rows/second.\n\nenum class TelemetryMode : uint8_t\n{\n    QUIET = 0,\n    HUMAN = 1,\n    FAST = 2\n};\n\nTelemetryMode telemetryMode = TelemetryMode::HUMAN;\n'''
+          assert old in s
+          s = s.replace(old, new)
+
+          old = '    Serial.print(" Fault=");\n    Serial.println(mode == Mode::FAULT ? 1 : 0);\n'
+          new = '''    Serial.print(" Fault=");\n    Serial.print(mode == Mode::FAULT ? 1 : 0);\n\n    Serial.print(" Telem=");\n    Serial.println(static_cast<uint8_t>(telemetryMode));\n'''
+          assert old in s
+          s = s.replace(old, new)
+
+          needle = '    if (strcmp(key, "KP") == 0)\n'
+          insert = '''    if (strcmp(key, "TELEM") == 0)\n    {\n        const int modeValue = static_cast<int>(value);\n\n        if (modeValue < 0 || modeValue > 2 || fabsf(value - modeValue) > 0.001f)\n        {\n            Serial.println("ERR TELEM_OUT_OF_RANGE");\n            return;\n        }\n\n        telemetryMode = static_cast<TelemetryMode>(modeValue);\n        Serial.print("ACK TELEM=");\n        Serial.println(modeValue);\n        return;\n    }\n\n'''
+          assert needle in s
+          s = s.replace(needle, insert + needle, 1)
+
+          old = '        "TEST=<deg>, TRIAL=<>"\n'
+          new = '        "TEST=<deg>, TRIAL=<>, TELEM=0|1|2"\n'
+          assert old in s
+          s = s.replace(old, new)
+
+          old = '''    const float currentPositionDeg =\n        homed ? countsToPositionDeg(currentCount) : 0.0f;\n\n    if (mode == Mode::CALIBRATING)\n'''
+          new = '''    const float currentPositionDeg =\n        homed ? countsToPositionDeg(currentCount) : 0.0f;\n\n    positionErrorDeg =\n        homed ? (targetPositionDeg - currentPositionDeg) : 0.0f;\n\n    if (mode == Mode::CALIBRATING)\n'''
+          assert old in s
+          s = s.replace(old, new)
+          s = s.replace('        positionErrorDeg =\n            targetPositionDeg - currentPositionDeg;\n\n', '', 1)
+
+          old = '''            const bool possibleStall =\n                fabsf(positionErrorDeg) >= STALL_ERROR_THRESHOLD_DEG &&\n                fabsf(appliedMotorCommand) >= STALL_PWM_THRESHOLD &&\n                deltaCount == 0;\n'''
+          new = '''            const bool stallProtectionEnabled =\n                mode == Mode::TEST_OUT ||\n                mode == Mode::TEST_RETURN;\n\n            const bool possibleStall =\n                stallProtectionEnabled &&\n                fabsf(positionErrorDeg) >= STALL_ERROR_THRESHOLD_DEG &&\n                fabsf(appliedMotorCommand) >= STALL_PWM_THRESHOLD &&\n                deltaCount == 0;\n'''
+          assert old in s
+          s = s.replace(old, new)
+
+          old = '''    static uint8_t telemetryDivider = 0;\n\n    if (++telemetryDivider >= TELEMETRY_DIVIDER)\n    {\n        telemetryDivider = 0;\n\n        printTelemetry(\n            currentCount,\n            deltaCount,\n            currentPositionDeg\n        );\n    }\n}\n'''
+          new = '''    static uint8_t fastTelemetryDivider = 0;\n    static uint8_t humanTelemetryDivider = 0;\n\n    if (telemetryMode == TelemetryMode::FAST)\n    {\n        if (++fastTelemetryDivider >= TELEMETRY_DIVIDER)\n        {\n            fastTelemetryDivider = 0;\n            printTelemetry(currentCount, deltaCount, currentPositionDeg);\n        }\n    }\n    else if (telemetryMode == TelemetryMode::HUMAN)\n    {\n        const bool worthShowing =\n            mode == Mode::CALIBRATING ||\n            mode == Mode::FAULT ||\n            fabsf(positionErrorDeg) >= 0.9f ||\n            fabsf(measuredOutputRPM) >= 1.0f ||\n            fabsf(appliedMotorCommand) >= 1.0f;\n\n        if (worthShowing && ++humanTelemetryDivider >= HUMAN_TELEMETRY_DIVIDER)\n        {\n            humanTelemetryDivider = 0;\n\n            Serial.print("LIVE Pos=");\n            Serial.print(currentPositionDeg, 2);\n            Serial.print("deg Err=");\n            Serial.print(positionErrorDeg, 2);\n            Serial.print("deg RPM=");\n            Serial.print(measuredOutputRPM, 1);\n            Serial.print(" PWM=");\n            Serial.print(appliedMotorCommand, 0);\n            Serial.print(" Mode=");\n            Serial.println(static_cast<uint8_t>(mode));\n        }\n\n        if (!worthShowing)\n        {\n            humanTelemetryDivider = 0;\n        }\n    }\n}\n'''
+          assert old in s
+          s = s.replace(old, new)
+          p.write_text(s)
+
+          p = Path('tools/run_position_trial.py')
+          s = p.read_text()
+          old = '''        (f"KD={a.kd:.9g}", "ACK KD=", a.kd),\n        ("HOLD", "ACK HOLD", None),\n'''
+          new = '''        (f"KD={a.kd:.9g}", "ACK KD=", a.kd),\n        ("TELEM=2", "ACK TELEM=", 2),\n        ("HOLD", "ACK HOLD", None),\n'''
+          assert old in s
+          s = s.replace(old, new)
+          old = '''        if port is not None:\n            try:\n                send(port, "HOLD")\n            except (SerialException, OSError):\n                pass\n            port.close()\n'''
+          new = '''        if port is not None:\n            try:\n                send(port, "HOLD")\n                send(port, "TELEM=1")\n            except (SerialException, OSError):\n                pass\n            port.close()\n'''
+          assert old in s
+          s = s.replace(old, new)
+          p.write_text(s)
+          PY
+
+          python -m py_compile tools/run_position_trial.py
+
+      - name: Commit patch and clean updater
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-position-v1-1.yml .position-v1-1-trigger
+          git add src/main.cpp tools/run_position_trial.py
+          git commit -m "Improve position hold stability and telemetry"
+          git push origin HEAD:position-hold-bayesian-v1
