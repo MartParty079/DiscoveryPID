@@ -23,7 +23,7 @@
 #include <string.h>
 
 const char FIRMWARE_VERSION[] =
-    "DiscoveryPID position-hold-v1 2026-08-06";
+    "DiscoveryPID position-hold-v1.1 2026-08-07";
 
 // ============================================================================
 // HARDWARE
@@ -53,7 +53,17 @@ constexpr float DEGREES_PER_OUTPUT_COUNT =
 // ============================================================================
 
 constexpr uint32_t CONTROL_INTERVAL_MS = 10;
-constexpr uint8_t TELEMETRY_DIVIDER = 10;  // About 10 rows/second.
+constexpr uint8_t TELEMETRY_DIVIDER = 10;  // FAST mode: about 10 rows/second.
+constexpr uint8_t HUMAN_TELEMETRY_DIVIDER = 50; // HUMAN mode: about 2 rows/second.
+
+enum class TelemetryMode : uint8_t
+{
+    QUIET = 0,
+    HUMAN = 1,
+    FAST = 2
+};
+
+TelemetryMode telemetryMode = TelemetryMode::HUMAN;
 
 // ============================================================================
 // CALIBRATION
@@ -71,9 +81,9 @@ constexpr uint32_t CALIBRATION_STILL_MS = 1500;
 //   Kd: RPM / (degree / second), derivative on measured position
 // ============================================================================
 
-float positionKp = 0.80f;
-float positionKi = 0.05f;
-float positionKd = 0.025f;
+float positionKp = 0.40f;
+float positionKi = 0.00f;
+float positionKd = 0.050f;
 
 constexpr float MIN_POSITION_KP = 0.0f;
 constexpr float MAX_POSITION_KP = 3.0f;
@@ -82,7 +92,7 @@ constexpr float MAX_POSITION_KI = 1.0f;
 constexpr float MIN_POSITION_KD = 0.0f;
 constexpr float MAX_POSITION_KD = 0.20f;
 
-float maximumReturnRPM = 35.0f;
+float maximumReturnRPM = 15.0f;
 constexpr float MIN_RETURN_RPM = 5.0f;
 constexpr float MAX_RETURN_RPM = 60.0f;
 
@@ -744,7 +754,10 @@ void printStatus()
     Serial.print(maximumReturnRPM, 3);
 
     Serial.print(" Fault=");
-    Serial.println(mode == Mode::FAULT ? 1 : 0);
+    Serial.print(mode == Mode::FAULT ? 1 : 0);
+
+    Serial.print(" Telem=");
+    Serial.println(static_cast<uint8_t>(telemetryMode));
 }
 
 void acknowledgeGain(const char *name, float value)
@@ -847,6 +860,22 @@ void processSerialCommand(char *command)
     if (!parseNumber(valueText, value))
     {
         Serial.println("ERR INVALID_NUMBER");
+        return;
+    }
+
+    if (strcmp(key, "TELEM") == 0)
+    {
+        const int modeValue = static_cast<int>(value);
+
+        if (modeValue < 0 || modeValue > 2 || fabsf(value - modeValue) > 0.001f)
+        {
+            Serial.println("ERR TELEM_OUT_OF_RANGE");
+            return;
+        }
+
+        telemetryMode = static_cast<TelemetryMode>(modeValue);
+        Serial.print("ACK TELEM=");
+        Serial.println(modeValue);
         return;
     }
 
@@ -1122,7 +1151,7 @@ void setup()
     Serial.println(
         "Commands: IDENTIFY, STATUS, CALIBRATE, ZERO, HOLD, STOP, "
         "KP=<>, KI=<>, KD=<>, SP=<>, SI=<>, MAXRPM=<>, POS=<>, "
-        "TEST=<deg>, TRIAL=<>"
+        "TEST=<deg>, TRIAL=<>, TELEM=0|1|2"
     );
 
     beginCalibration();
@@ -1169,6 +1198,9 @@ void loop()
     const float currentPositionDeg =
         homed ? countsToPositionDeg(currentCount) : 0.0f;
 
+    positionErrorDeg =
+        homed ? (targetPositionDeg - currentPositionDeg) : 0.0f;
+
     if (mode == Mode::CALIBRATING)
     {
         updateCalibration(currentCount, deltaCount, now);
@@ -1184,9 +1216,6 @@ void loop()
     else
     {
         updateTestState(now);
-
-        positionErrorDeg =
-            targetPositionDeg - currentPositionDeg;
 
         if (
             fabsf(currentPositionDeg) > MAX_ALLOWED_POSITION_DEG ||
@@ -1222,7 +1251,12 @@ void loop()
 
             // Stall protection only when the controller is asking for motion
             // because a static holding torque is valid near home.
+            const bool stallProtectionEnabled =
+                mode == Mode::TEST_OUT ||
+                mode == Mode::TEST_RETURN;
+
             const bool possibleStall =
+                stallProtectionEnabled &&
                 fabsf(positionErrorDeg) >= STALL_ERROR_THRESHOLD_DEG &&
                 fabsf(appliedMotorCommand) >= STALL_PWM_THRESHOLD &&
                 deltaCount == 0;
@@ -1246,16 +1280,45 @@ void loop()
         }
     }
 
-    static uint8_t telemetryDivider = 0;
+    static uint8_t fastTelemetryDivider = 0;
+    static uint8_t humanTelemetryDivider = 0;
 
-    if (++telemetryDivider >= TELEMETRY_DIVIDER)
+    if (telemetryMode == TelemetryMode::FAST)
     {
-        telemetryDivider = 0;
+        if (++fastTelemetryDivider >= TELEMETRY_DIVIDER)
+        {
+            fastTelemetryDivider = 0;
+            printTelemetry(currentCount, deltaCount, currentPositionDeg);
+        }
+    }
+    else if (telemetryMode == TelemetryMode::HUMAN)
+    {
+        const bool worthShowing =
+            mode == Mode::CALIBRATING ||
+            mode == Mode::FAULT ||
+            fabsf(positionErrorDeg) >= 0.9f ||
+            fabsf(measuredOutputRPM) >= 1.0f ||
+            fabsf(appliedMotorCommand) >= 1.0f;
 
-        printTelemetry(
-            currentCount,
-            deltaCount,
-            currentPositionDeg
-        );
+        if (worthShowing && ++humanTelemetryDivider >= HUMAN_TELEMETRY_DIVIDER)
+        {
+            humanTelemetryDivider = 0;
+
+            Serial.print("LIVE Pos=");
+            Serial.print(currentPositionDeg, 2);
+            Serial.print("deg Err=");
+            Serial.print(positionErrorDeg, 2);
+            Serial.print("deg RPM=");
+            Serial.print(measuredOutputRPM, 1);
+            Serial.print(" PWM=");
+            Serial.print(appliedMotorCommand, 0);
+            Serial.print(" Mode=");
+            Serial.println(static_cast<uint8_t>(mode));
+        }
+
+        if (!worthShowing)
+        {
+            humanTelemetryDivider = 0;
+        }
     }
 }

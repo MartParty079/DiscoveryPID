@@ -250,6 +250,7 @@ def configure(port: serial.Serial, a: argparse.Namespace) -> None:
         (f"KP={a.kp:.9g}", "ACK KP=", a.kp),
         (f"KI={a.ki:.9g}", "ACK KI=", a.ki),
         (f"KD={a.kd:.9g}", "ACK KD=", a.kd),
+        ("TELEM=2", "ACK TELEM=", 2),
         ("HOLD", "ACK HOLD", None),
     ]
 
@@ -710,6 +711,7 @@ def main() -> int:
         if port is not None:
             try:
                 send(port, "HOLD")
+                send(port, "TELEM=1")
             except (SerialException, OSError):
                 pass
             port.close()
