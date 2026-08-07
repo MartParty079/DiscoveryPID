@@ -1,0 +1,512 @@
+le ) || " " ||
+        quoteArgument( workerScript ) || " " ||
+
+        "--port " || quoteArgument( portName ) || " " ||
+        "--trial " || Char( runNumber ) || " " ||
+
+        "--kp " || Char( kpValue ) || " " ||
+        "--ki " || Char( kiValue ) || " " ||
+        "--kd " || Char( kdValue ) || " " ||
+
+        "--test-offset " || Char( testOffsetDeg ) || " " ||
+
+        "--result-file " || quoteArgument( resultPath ) || " " ||
+        "--raw-file " || quoteArgument( rawPath ) || " " ||
+        "--history-file " || quoteArgument( historyCSVPath ) ||
+
+        "\!N" ||
+        "exit /b %ERRORLEVEL%\!N";
+
+    Save Text File(
+        batchPath,
+        batchText,
+        Mode( "Replace" )
+    );
+
+    outputText =
+        Run Program(
+            Executable( cmdExecutable ),
+
+            Options(
+                {
+                    "/d",
+                    "/c",
+                    quoteArgument( batchPath )
+                }
+            ),
+
+            Read Function( "text" )
+        );
+
+    displayedOutput =
+        If(
+            Is Missing( outputText ),
+            "(No console output returned.)",
+            Char( outputText )
+        );
+
+    Save Text File(
+        consoleLogPath,
+        displayedOutput,
+        Mode( "Replace" )
+    );
+
+    Print( displayedOutput );
+
+    If(
+        !File Exists( resultPath ),
+
+        New Window(
+            "Position Trial Failed",
+            <<Modal,
+
+            V List Box(
+                Text Box(
+                    "Python did not create a result file.\!N\!N" ||
+                    "Console log:\!N" ||
+                    consoleLogPath ||
+                    "\!N\!N" ||
+                    displayedOutput
+                ),
+
+                Button Box(
+                    "OK",
+                    Current Window() << Close Window
+                )
+            )
+        );
+
+        Return( {} );
+    );
+
+    resultDT = Open( resultPath, Invisible );
+
+    resultList = Eval List(
+        {
+            Column( resultDT, "Score" )[1],
+            Column( resultDT, "Settling Time (s)" )[1],
+            Column( resultDT, "Overshoot (deg)" )[1],
+            Column( resultDT, "Oscillations" )[1],
+            Column( resultDT, "IAE (deg*s)" )[1],
+            Column( resultDT, "Peak Output RPM" )[1],
+            Column( resultDT, "Final Error (deg)" )[1],
+            Column( resultDT, "Success" )[1],
+            Column( resultDT, "Status" )[1]
+        }
+    );
+
+    Close( resultDT, No Save );
+
+    resultList;
+);
+
+saveCompletedRun =
+Function(
+    {
+        dt,
+        rowIndex,
+        runNumber,
+        iterationNumber,
+        resultList
+    },
+
+    Column( dt, "Run" )[rowIndex] = runNumber;
+    Column( dt, "Iteration" )[rowIndex] = iterationNumber;
+
+    Column( dt, "Score" )[rowIndex] = resultList[1];
+    Column( dt, "Settling Time (s)" )[rowIndex] = resultList[2];
+    Column( dt, "Overshoot (deg)" )[rowIndex] = resultList[3];
+    Column( dt, "Oscillations" )[rowIndex] = resultList[4];
+    Column( dt, "IAE (deg*s)" )[rowIndex] = resultList[5];
+    Column( dt, "Peak Output RPM" )[rowIndex] = resultList[6];
+    Column( dt, "Final Error (deg)" )[rowIndex] = resultList[7];
+    Column( dt, "Success" )[rowIndex] = resultList[8];
+    Column( dt, "Status" )[rowIndex] = resultList[9];
+
+    dt << Save( workingTablePath );
+    exportCompactTable( dt );
+);
+
+// ============================================================================
+// STARTUP
+// ============================================================================
+
+validateSetup();
+
+If(
+    !confirmStudyStart(),
+    Throw( "Position study cancelled." )
+);
+
+dt = ensureWorkingTable();
+Current Data Table( dt );
+
+stopRequested = 0;
+stopReason = "";
+
+If(
+    successfulRunExists( dt ),
+    stopRequested = 1;
+    stopReason =
+        "This study already contains a successful PID combination.";
+);
+
+// ============================================================================
+// SEEDS
+// ============================================================================
+
+If(
+    !stopRequested,
+
+    For(
+        seedIndex = 1,
+        seedIndex <= N Items( seedSettings ),
+        seedIndex++,
+
+        seedKp = seedSettings[seedIndex][1];
+        seedKi = seedSettings[seedIndex][2];
+        seedKd = seedSettings[seedIndex][3];
+
+        If(
+            N Rows( dt ) >= maxTotalRuns,
+            stopRequested = 1;
+            stopReason = "Maximum total run count reached.";
+            Break();
+        );
+
+        If(
+            !combinationAlreadyCompleted(
+                dt,
+                seedKp,
+                seedKi,
+                seedKd
+            ),
+
+            runNumber = nextRunNumber( dt );
+
+            If(
+                !confirmPhysicalRun(
+                    runNumber,
+                    seedKp,
+                    seedKi,
+                    seedKd,
+                    "Seed"
+                ),
+
+                stopRequested = 1;
+                stopReason = "Study stopped by operator.";
+                Break();
+            );
+
+            resultList =
+                runPhysicalTrial(
+                    runNumber,
+                    seedKp,
+                    seedKi,
+                    seedKd
+                );
+
+            If(
+                N Items( resultList ) == 0,
+
+                stopRequested = 1;
+                stopReason = "Physical trial failed.";
+                Break();
+            );
+
+            dt << Add Rows( 1 );
+            newRow = N Rows( dt );
+
+            Column( dt, "KP" )[newRow] = seedKp;
+            Column( dt, "KI" )[newRow] = seedKi;
+            Column( dt, "KD" )[newRow] = seedKd;
+
+            saveCompletedRun(
+                dt,
+                newRow,
+                runNumber,
+                0,
+                resultList
+            );
+
+            If(
+                resultList[8] == 1,
+
+                stopRequested = 1;
+                stopReason =
+                    "Position response target achieved during seed run " ||
+                    Char( runNumber ) ||
+                    ".";
+                Break();
+            );
+        );
+    );
+);
+
+// ============================================================================
+// BAYESIAN OPTIMIZATION
+// ============================================================================
+
+If(
+    !stopRequested,
+
+    For(
+        bayesIteration = 1,
+        bayesIteration <= maximumBayesianRuns,
+        bayesIteration++,
+
+        If(
+            N Rows( dt ) >= maxTotalRuns,
+            stopRequested = 1;
+            stopReason = "Maximum total run count reached.";
+            Break();
+        );
+
+        runNumber = nextRunNumber( dt );
+        rowsBefore = N Rows( dt );
+
+        bo =
+            dt << Bayesian Optimization(
+                Y( :Score ),
+
+                X(
+                    :KP,
+                    :KI,
+                    :KD
+                ),
+
+                Iteration( :Iteration ),
+                Run Order( :Run ),
+
+                Generate Candidate Set(
+                    Candidate Set Size( 4000 ),
+                    Include Runs that Do Not Conform to Constraints( 0 )
+                ),
+
+                Autoselect Batch(
+                    Batch Size( 1 ),
+                    Minimum RSquare( 0.50 )
+                ),
+
+                Make Table Options(
+                    Location( 1 ),
+                    Randomize Runs( 0 ),
+                    Save desirability function values to columns( 0 ),
+                    Save startup script for next batch selection to data table( 0 ),
+                    Include observed desirabilities( 0 ),
+                    Include original candidate set row indices( 0 ),
+                    Include reason added column( 0 ),
+                    Include predicted response values( 0 ),
+                    Include prediction standard deviations( 0 ),
+                    Include Bayesian desirability expected improvement column( 0 )
+                )
+            );
+
+        bo << Make Table;
+        Wait( 0.2 );
+        Report( bo ) << Close Window;
+
+        If(
+            N Rows( dt ) <= rowsBefore,
+
+            stopRequested = 1;
+            stopReason =
+                "JMP Bayesian Optimization did not append a candidate row.";
+            Break();
+        );
+
+        newRow = N Rows( dt );
+
+        proposedKp = Column( dt, "KP" )[newRow];
+        proposedKi = Column( dt, "KI" )[newRow];
+        proposedKd = Column( dt, "KD" )[newRow];
+
+        If(
+            !confirmPhysicalRun(
+                runNumber,
+                proposedKp,
+                proposedKi,
+                proposedKd,
+                "Bayesian"
+            ),
+
+            dt << Delete Rows( newRow );
+            dt << Save( workingTablePath );
+
+            stopRequested = 1;
+            stopReason = "Study stopped by operator.";
+            Break();
+        );
+
+        resultList =
+            runPhysicalTrial(
+                runNumber,
+                proposedKp,
+                proposedKi,
+                proposedKd
+            );
+
+        If(
+            N Items( resultList ) == 0,
+
+            dt << Delete Rows( newRow );
+            dt << Save( workingTablePath );
+
+            stopRequested = 1;
+            stopReason = "Physical trial failed.";
+            Break();
+        );
+
+        saveCompletedRun(
+            dt,
+            newRow,
+            runNumber,
+            bayesIteration,
+            resultList
+        );
+
+        If(
+            resultList[8] == 1,
+
+            stopRequested = 1;
+            stopReason =
+                "Position response target achieved during Bayesian run " ||
+                Char( runNumber ) ||
+                ".";
+            Break();
+        );
+    );
+);
+
+If(
+    stopReason == "",
+
+    If(
+        N Rows( dt ) >= maxTotalRuns,
+        stopReason = "Maximum total run count reached.",
+        stopReason = "Configured Bayesian run limit reached."
+    );
+);
+
+// ============================================================================
+// REPORTS
+// ============================================================================
+
+exportCompactTable( dt );
+dt << Save( workingTablePath );
+dt << Bring Window To Front;
+
+If(
+    N Rows( dt ) > 0,
+
+    dt << Graph Builder(
+        Size( 720, 450 ),
+        Show Control Panel( 0 ),
+
+        Variables(
+            X( :Run ),
+            Y( :Score )
+        ),
+
+        Elements(
+            Points( X, Y, Legend( 3 ) ),
+            Line( X, Y, Legend( 5 ) )
+        ),
+
+        SendToReport(
+            Dispatch(
+                {},
+                "graph title",
+                TextEditBox,
+                {
+                    Set Text(
+                        studyName ||
+                        " — Position PID Score by Run"
+                    )
+                }
+            )
+        )
+    );
+);
+
+If(
+    File Exists( historyCSVPath ),
+
+    historyDT = Open( historyCSVPath );
+
+    historyDT << Graph Builder(
+        Size( 850, 500 ),
+        Show Control Panel( 0 ),
+
+        Variables(
+            X( :"Return Time (s)"n ),
+            Y( :"Position (deg)"n ),
+            Overlay( :Run )
+        ),
+
+        Elements(
+            Line( X, Y, Legend( 6 ) )
+        ),
+
+        SendToReport(
+            Dispatch(
+                {},
+                "graph title",
+                TextEditBox,
+                {
+                    Set Text(
+                        studyName ||
+                        " — Return-to-Home Position by Run"
+                    )
+                }
+            )
+        )
+    );
+);
+
+currentBest = bestScore( dt );
+
+New Window(
+    "DiscoveryPID Position Study Complete",
+    <<Modal,
+
+    V List Box(
+        Text Box(
+            "Study: " || studyName || "\!N\!N" ||
+
+            "Stop reason:\!N" ||
+            stopReason ||
+            "\!N\!N" ||
+
+            "Completed runs: " ||
+            Char( N Rows( dt ) ) ||
+            " of " ||
+            Char( maxTotalRuns ) ||
+            "\!N" ||
+
+            "Best score: " ||
+            If(
+                Is Missing( currentBest ),
+                "N/A",
+                Char( currentBest )
+            ) ||
+            "\!N\!N" ||
+
+            "Optimization table:\!N" ||
+            workingTablePath ||
+            "\!N\!N" ||
+
+            "Compact results:\!N" ||
+            compactCSVPath ||
+            "\!N\!N" ||
+
+            "Response history:\!N" ||
+            historyCSVPath
+        ),
+
+        Button Box(
+            "OK",
+            Current Window() << Close Window
+        )
+    )
+);
