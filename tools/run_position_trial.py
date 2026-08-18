@@ -19,7 +19,7 @@ PAIR_RE = re.compile(
     r"([A-Za-z][A-Za-z0-9_]*)=(-?(?:\d+(?:\.\d*)?|\.\d+))"
 )
 
-EXPECTED_FW = "DiscoveryPID position-hold-v1"
+EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.3-300deg"
 
 TELEMETRY_FIELDS = {
     "Trial",
@@ -31,6 +31,7 @@ TELEMETRY_FIELDS = {
     "PosDeg",
     "PosTarget",
     "PosError",
+    "ErrCounts",
     "SpeedTarget",
     "OutRPM",
     "Counts",
@@ -44,6 +45,7 @@ RESULT_HEADERS = [
     "KD",
     "Score",
     "Settling Time (s)",
+    "Return Timer Started",
     "Overshoot (deg)",
     "Oscillations",
     "IAE (deg*s)",
@@ -98,7 +100,7 @@ def arguments() -> argparse.Namespace:
     p.add_argument("--ki", required=True, type=float)
     p.add_argument("--kd", required=True, type=float)
 
-    p.add_argument("--test-offset", type=float, default=20.0)
+    p.add_argument("--test-offset", type=float, default=300.0)
     p.add_argument("--baud", type=int, default=115200)
 
     p.add_argument("--result-file", required=True, type=Path)
@@ -107,18 +109,18 @@ def arguments() -> argparse.Namespace:
 
     p.add_argument("--expected-firmware", default=EXPECTED_FW)
 
-    p.add_argument("--overall-timeout", type=float, default=20.0)
-    p.add_argument("--settle-band-deg", type=float, default=1.2)
-    p.add_argument("--settle-rpm", type=float, default=1.5)
-    p.add_argument("--settle-hold-seconds", type=float, default=1.0)
+    p.add_argument("--overall-timeout", type=float, default=60.0)
 
-    p.add_argument("--success-settling-seconds", type=float, default=2.0)
-    p.add_argument("--success-overshoot-deg", type=float, default=1.0)
-    p.add_argument("--success-final-error-deg", type=float, default=0.8)
+    p.add_argument("--success-settling-seconds", type=float, default=1.0)
+    p.add_argument("--success-overshoot-deg", type=float, default=5.0)
+    p.add_argument("--success-final-error-deg", type=float, default=1.2)
 
-    p.add_argument("--max-position-deg", type=float, default=65.0)
-    p.add_argument("--max-output-rpm", type=float, default=65.0)
-    p.add_argument("--max-pwm", type=float, default=225.0)
+    p.add_argument("--return-max-pwm", type=float, default=225.0)
+    p.add_argument("--home-padding-pulses", type=int, default=2)
+    p.add_argument("--minimum-drive-pwm", type=float, default=60.0)
+    p.add_argument("--setup-kp", type=float, required=True)
+    p.add_argument("--setup-ki", type=float, required=True)
+    p.add_argument("--setup-kd", type=float, required=True)
 
     return p.parse_args()
 
@@ -157,29 +159,47 @@ def open_without_reset(port_name: str, baud: int) -> serial.Serial:
     # Reassert after opening because some Windows drivers change line state.
     port.dtr = False
     port.rts = False
-    time.sleep(0.20)
+    time.sleep(0.75)
     return port
 
 
 def identify(port: serial.Serial, token: str) -> str:
+    """
+    Identify the firmware robustly on Windows/Arduino Mega.
+
+    Opening COM7 can occasionally disturb the first serial command even with
+    DTR/RTS disabled. Retry IDENTIFY rather than failing on one malformed line.
+    """
     port.reset_input_buffer()
-    send(port, "IDENTIFY")
 
-    deadline = time.monotonic() + 2.5
-    while time.monotonic() < deadline:
-        line = port.readline().decode("utf-8", errors="replace").strip()
-        if not line:
-            continue
+    for attempt in range(1, 7):
+        send(port, "IDENTIFY")
+        deadline = time.monotonic() + 1.5
 
-        print(line, flush=True)
+        while time.monotonic() < deadline:
+            line = port.readline().decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
 
-        if line.startswith("Firmware:"):
-            firmware = line.partition(":")[2].strip()
-            if token not in firmware:
-                raise RuntimeError(f"Wrong firmware: {firmware}")
-            return firmware
+            print(line, flush=True)
 
-    raise RuntimeError("No firmware identification received")
+            if line.startswith("Firmware:"):
+                firmware = line.partition(":")[2].strip()
+                if token not in firmware:
+                    raise RuntimeError(f"Wrong firmware: {firmware}")
+                return firmware
+
+            # A partially received first command can produce UNKNOWN_COMMAND.
+            # Ignore it here and retry IDENTIFY.
+            if line.startswith("ERR UNKNOWN_COMMAND"):
+                break
+
+        port.reset_input_buffer()
+        time.sleep(0.25 * attempt)
+
+    raise RuntimeError(
+        "No firmware identification received after 6 IDENTIFY attempts"
+    )
 
 
 def wait_for_ack(
@@ -236,10 +256,28 @@ def get_status(port: serial.Serial) -> dict[str, float]:
 def configure(port: serial.Serial, a: argparse.Namespace) -> None:
     status = get_status(port)
 
+    # A Mega can reset when COM7 opens. Give startup a moment to restore home.
+    if int(status.get("Homed", 0)) != 1:
+        time.sleep(0.75)
+        status = get_status(port)
+
+    # Run 1 starts immediately after the user physically homes the mechanism.
+    # If the USB open reset cleared volatile home state, re-zero the CURRENT
+    # physical position before the very first trial.
+    if int(status.get("Homed", 0)) != 1 and a.trial == 1:
+        print(
+            "INFO: Run 1 lost volatile home during COM7 open; "
+            "re-zeroing current physical position.",
+            flush=True,
+        )
+        port.reset_input_buffer()
+        send(port, "ZERO")
+        wait_for_ack(port, "ACK ZERO", None, timeout=2.0)
+        status = get_status(port)
+
     if int(status.get("Homed", 0)) != 1:
         raise RuntimeError(
-            "Controller is not homed. Wiggle the stick left/right, "
-            "hold it at center until EVENT HOMED, then restart JMP."
+            "NOT_HOMED_AFTER_SERIAL_OPEN"
         )
 
     if int(status.get("Fault", 0)) != 0:
@@ -250,6 +288,12 @@ def configure(port: serial.Serial, a: argparse.Namespace) -> None:
         (f"KP={a.kp:.9g}", "ACK KP=", a.kp),
         (f"KI={a.ki:.9g}", "ACK KI=", a.ki),
         (f"KD={a.kd:.9g}", "ACK KD=", a.kd),
+        (f"MAXPWM={a.return_max_pwm:.9g}", "ACK MAXPWM=", a.return_max_pwm),
+        (f"HOMEPAD={a.home_padding_pulses}", "ACK HOMEPAD=", a.home_padding_pulses),
+        (f"MINPWM={a.minimum_drive_pwm:.9g}", "ACK MINPWM=", a.minimum_drive_pwm),
+        (f"SKP={a.setup_kp:.9g}", "ACK SKP=", a.setup_kp),
+        (f"SKI={a.setup_ki:.9g}", "ACK SKI=", a.setup_ki),
+        (f"SKD={a.setup_kd:.9g}", "ACK SKD=", a.setup_kd),
         ("TELEM=2", "ACK TELEM=", 2),
         ("HOLD", "ACK HOLD", None),
     ]
@@ -266,6 +310,12 @@ def configure(port: serial.Serial, a: argparse.Namespace) -> None:
         "KP": a.kp,
         "KI": a.ki,
         "KD": a.kd,
+        "MaxPWM": a.return_max_pwm,
+        "HomePad": float(a.home_padding_pulses),
+        "MinPWM": a.minimum_drive_pwm,
+        "SKP": a.setup_kp,
+        "SKI": a.setup_ki,
+        "SKD": a.setup_kd,
         "Homed": 1.0,
     }
 
@@ -275,6 +325,33 @@ def configure(port: serial.Serial, a: argparse.Namespace) -> None:
             raise RuntimeError(
                 f"STATUS mismatch for {key}: expected {expected}, got {actual}"
             )
+
+
+def recover_home(port: serial.Serial, timeout: float = 20.0) -> bool:
+    """Return the mechanism to a settled HOLD before releasing the serial port."""
+    try:
+        port.reset_input_buffer()
+        send(port, "HOLD")
+        wait_for_ack(port, "ACK HOLD", None, timeout=2.0)
+    except (SerialException, OSError, RuntimeError):
+        return False
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            status = get_status(port)
+        except (SerialException, OSError, RuntimeError):
+            return False
+
+        if (
+            int(status.get("Homed", 0)) == 1
+            and int(status.get("Settled", 0)) == 1
+        ):
+            return True
+
+        time.sleep(0.15)
+
+    return False
 
 
 def sign_outside_deadband(value: float, deadband: float = 0.8) -> int:
@@ -287,33 +364,30 @@ def sign_outside_deadband(value: float, deadband: float = 0.8) -> int:
 
 def settling_time(
     rows: list[dict[str, float]],
-    band_deg: float,
-    rpm_limit: float,
-    hold_seconds: float,
+    home_padding_pulses: int,
 ) -> float | None:
-    if not rows:
-        return None
+    """Release-to-home settling time.
 
-    start_index = 0
+    Time zero is EVENT TEST_RETURN: the instant firmware releases the displaced
+    hold and switches the target back to home under the candidate PID.
 
-    for index, row in enumerate(rows):
-        inside = (
-            abs(row["error"]) <= band_deg
-            and abs(row["rpm"]) <= rpm_limit
-        )
+    The measured settling time is the first return telemetry sample satisfying:
 
-        if not inside:
-            start_index = index + 1
+        abs(ErrCounts) <= home_padding_pulses
+
+    Displacement/prep time is excluded completely.
+    No RPM or extra dwell requirement is applied to this metric.
+    """
+    for row in rows:
+        error_counts = row.get("error_counts", math.nan)
+
+        if not math.isfinite(error_counts):
             continue
 
-        start_time = rows[start_index]["return_time"]
-        current_time = row["return_time"]
-
-        if current_time - start_time >= hold_seconds:
-            return start_time
+        if abs(error_counts) <= home_padding_pulses:
+            return float(row["return_time"])
 
     return None
-
 
 def overshoot_and_oscillations(
     rows: list[dict[str, float]],
@@ -458,11 +532,13 @@ def write_result(
         if row["return_time"] >= 0
     ]
 
+    # If this is zero, EVENT TEST_RETURN was never observed and there is no
+    # legitimate release-to-home timing measurement.
+    return_timer_started = int(len(return_rows) > 0)
+
     settling = settling_time(
         return_rows,
-        a.settle_band_deg,
-        a.settle_rpm,
-        a.settle_hold_seconds,
+        a.home_padding_pulses,
     )
 
     overshoot, oscillations = overshoot_and_oscillations(return_rows)
@@ -478,7 +554,7 @@ def write_result(
     final_error = (
         statistics.fmean(abs(row["error"]) for row in final_window)
         if final_window
-        else math.inf
+        else 999.0
     )
 
     timed_out = status in {"TEST_TIMEOUT", "TEST_PREP_TIMEOUT"}
@@ -489,14 +565,29 @@ def write_result(
         else a.overall_timeout
     )
 
+    abnormal_status = status not in {
+        "COMPLETE",
+        "TEST_TIMEOUT",
+        "TEST_PREP_TIMEOUT",
+    }
+
+    # FAST-RETURN objective:
+    # settling time dominates. Overshoot/oscillation/final error remain secondary
+    # penalties so JMP does not "win" by blasting through home without settling.
     score = (
-        settling_for_score
-        + 2.0 * overshoot
-        + 1.5 * float(oscillations)
-        + 0.05 * iae
-        + 0.5 * final_error
-        + (50.0 if timed_out else 0.0)
+        10.0 * settling_for_score
+        + 0.25 * overshoot
+        + 0.25 * float(oscillations)
+        + 0.01 * iae
+        + 0.25 * final_error
+        + (25.0 if timed_out else 0.0)
+        + (500.0 if abnormal_status else 0.0)
     )
+
+    # Never emit inf/nan into CSV. JMP can infer a Character response column
+    # from non-numeric tokens, which breaks Response Limits/Bayesian Optimization.
+    if not math.isfinite(score):
+        score = 9999.0
 
     success = int(
         status == "COMPLETE"
@@ -524,15 +615,12 @@ def write_result(
                     if settling is None
                     else f"{settling:.8f}"
                 ),
+                return_timer_started,
                 f"{overshoot:.8f}",
                 oscillations,
                 f"{iae:.8f}",
                 f"{peak_rpm:.8f}",
-                (
-                    ""
-                    if not math.isfinite(final_error)
-                    else f"{final_error:.8f}"
-                ),
+                f"{final_error:.8f}",
                 success,
                 status,
                 len(return_rows),
@@ -543,17 +631,21 @@ def write_result(
 
     print(
         "RESULT "
-         f"Run={a.trial} "
+        f"Run={a.trial} "
         f"KP={a.kp:.6g} "
         f"KI={a.ki:.6g} "
         f"KD={a.kd:.6g} "
         f"Score={score:.6f} "
+        f"Settling={settling if settling is not None else 'MISSING'} "
+        f"ReturnTimerStarted={return_timer_started} "
         f"Success={success} "
         f"Status={status}",
         flush=True,
     )
 
-    return 0 if status in {"COMPLETE", "TEST_TIMEOUT", "TEST_PREP_TIMEOUT"} else 4
+    # Always emit a finite diagnostic row. The JSL decides whether to warn,
+    # continue, or exclude the row from best-setup-PID selection.
+    return 0
 
 
 def main() -> int:
@@ -561,14 +653,26 @@ def main() -> int:
 
     if not (
         a.trial >= 1
-        and 0.0 <= a.kp <= 3.0
-        and 0.0 <= a.ki <= 1.0
-        and 0.0 <= a.kd <= 0.20
-        and 5.0 <= abs(a.test_offset) <= 30.0
-        and a.overall_timeout > 5.0
+        and math.isfinite(a.kp)
+        and math.isfinite(a.ki)
+        and math.isfinite(a.kd)
+        and math.isfinite(a.test_offset)
+        and math.isfinite(a.return_max_pwm)
+        and a.home_padding_pulses >= 0
+        and math.isfinite(a.minimum_drive_pwm)
+        and math.isfinite(a.setup_kp)
+        and math.isfinite(a.setup_ki)
+        and math.isfinite(a.setup_kd)
+        and a.overall_timeout > 0.0
     ):
-        print("Invalid trial arguments", file=sys.stderr)
-        return 2
+        # Still emit a numeric result rather than killing the JMP study.
+        rows: list[dict[str, float | str]] = []
+        return write_result(
+            a,
+            "",
+            "INVALID_ARGUMENTS",
+            rows,
+        )
 
     a.raw_file.parent.mkdir(parents=True, exist_ok=True)
     a.result_file.parent.mkdir(parents=True, exist_ok=True)
@@ -656,18 +760,6 @@ def main() -> int:
             rpm = values["OutRPM"]
             pwm = values["PWM"]
 
-            if abs(position) > a.max_position_deg:
-                status = "ABORT_MAX_POSITION"
-                raise RuntimeError(status)
-
-            if abs(rpm) > a.max_output_rpm:
-                status = "ABORT_MAX_OUTPUT_RPM"
-                raise RuntimeError(status)
-
-            if abs(pwm) > a.max_pwm + 0.5:
-                status = "ABORT_MAX_PWM"
-                raise RuntimeError(status)
-
             now = time.monotonic()
             elapsed = now - start
 
@@ -690,6 +782,7 @@ def main() -> int:
                     "position": position,
                     "target": values["PosTarget"],
                     "error": values["PosError"],
+                    "error_counts": values["ErrCounts"],
                     "speed_target": values["SpeedTarget"],
                     "rpm": rpm,
                     "counts": values["Counts"],
@@ -702,17 +795,28 @@ def main() -> int:
             status = "WORKER_TIMEOUT"
 
     except (SerialException, OSError, RuntimeError, ValueError) as error:
-        print(f"ERROR: {error}", file=sys.stderr, flush=True)
+        error_text = str(error).strip()
+        status = "CONTROL_ERROR_" + re.sub(
+            r"[^A-Za-z0-9_]+",
+            "_",
+            error_text,
+        ).strip("_")[:120]
+        print(f"ERROR: {error_text}", flush=True)
 
     except KeyboardInterrupt:
         status = "ABORT_USER"
 
     finally:
         if port is not None:
+            recovered = recover_home(port)
+            if not recovered:
+                print(
+                    "WARNING: mechanism did not confirm settled home before COM close",
+                    flush=True,
+                )
             try:
-                send(port, "HOLD")
                 send(port, "TELEM=1")
-            except (SerialException, OSError):
+            except Exception:
                 pass
             port.close()
 

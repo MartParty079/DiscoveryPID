@@ -10,20 +10,26 @@
 //   5. The controller actively returns the stick to Home after disturbances.
 //
 // Control architecture:
-//   Outer position PID -> target output RPM
-//   Inner speed PI     -> DRV8871 PWM
+//   TEST_OUT: best-scoring completed PID so far -> PWM directly
+//   TEST_RETURN: current candidate PID -> PWM directly
 //
-// JMP changes KP/KI/KD at runtime and requests a repeatable TEST=<degrees>.
-// TEST first moves to the offset using conservative fixed setup gains, then
-// switches to the candidate PID for the return-to-home response.
+// There is no inner speed PI in either leg.
 
 #include <Arduino.h>
+#include <EEPROM.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
 const char FIRMWARE_VERSION[] =
-    "DiscoveryPID position-hold-v1.1 2026-08-07";
+    "DiscoveryPID direct-position-pid-v3.3-300deg 2026-08-17";
+
+// Preserve a known-good home across the USB serial reset that can occur when
+// JMP opens COM7. We store only a validity marker, not an encoder count.
+// On reboot the encoder count starts at zero; if the shaft was safely at home
+// when the reset occurred, the current physical position becomes home again.
+constexpr int EEPROM_HOME_MAGIC_ADDRESS = 0;
+constexpr uint32_t EEPROM_HOME_MAGIC = 0x44504944UL; // "DPID"
 
 // ============================================================================
 // HARDWARE
@@ -39,7 +45,7 @@ constexpr uint8_t MOTOR_IN2_PIN = 10;
 // ============================================================================
 
 constexpr float GEAR_RATIO = 30613.0f / 1500.0f;
-constexpr float COUNTS_PER_MOTOR_REV = 28.0f;
+constexpr float COUNTS_PER_MOTOR_REV = 56.0f;
 constexpr int8_t ENCODER_DIRECTION_SIGN = 1;
 
 constexpr float COUNTS_PER_OUTPUT_REV =
@@ -69,72 +75,74 @@ TelemetryMode telemetryMode = TelemetryMode::HUMAN;
 // CALIBRATION
 // ============================================================================
 
-constexpr long CALIBRATION_MIN_SPAN_COUNTS = 48;  // About 30 degrees total.
+constexpr long CALIBRATION_MIN_SPAN_COUNTS = 96;  // About 30 physical output degrees total.
 constexpr uint8_t CALIBRATION_MIN_REVERSALS = 1;
 constexpr uint32_t CALIBRATION_STILL_MS = 1500;
 
 // ============================================================================
-// POSITION PID — RUNTIME/JMP TUNABLE
+// DIRECT POSITION PID — RUNTIME/JMP TUNABLE
+//
+// Return path: position error -> Kp + Ki + Kd -> PWM -> motor
+// There is NO inner speed PI during the return.
+//
 // Units:
-//   Kp: RPM / degree
-//   Ki: RPM / (degree * second)
-//   Kd: RPM / (degree / second), derivative on measured position
+//   Kp: PWM / degree
+//   Ki: PWM / (degree * second)
+//   Kd: PWM / (degree / second), derivative on measured position velocity
 // ============================================================================
 
-float positionKp = 0.40f;
-float positionKi = 0.00f;
-float positionKd = 0.050f;
+float positionKp = 4.0f;
+float positionKi = 0.0f;
+float positionKd = 0.30f;
 
 constexpr float MIN_POSITION_KP = 0.0f;
-constexpr float MAX_POSITION_KP = 3.0f;
+constexpr float MAX_POSITION_KP = 100.0f;
 constexpr float MIN_POSITION_KI = 0.0f;
-constexpr float MAX_POSITION_KI = 1.0f;
+constexpr float MAX_POSITION_KI = 100.0f;
 constexpr float MIN_POSITION_KD = 0.0f;
-constexpr float MAX_POSITION_KD = 0.20f;
+constexpr float MAX_POSITION_KD = 20.0f;
 
-float maximumReturnRPM = 15.0f;
-constexpr float MIN_RETURN_RPM = 5.0f;
-constexpr float MAX_RETURN_RPM = 60.0f;
+constexpr float MAX_PWM_COMMAND = 225.0f;
+float maximumReturnPWM = 225.0f;
+
+float minimumDrivePWM = 60.0f;
 
 constexpr float POSITION_INTEGRAL_LIMIT = 80.0f;
+constexpr float POSITION_I_ENABLE_BAND_DEG = 10.0f;
+constexpr float POSITION_I_BLEED_PER_SEC = 8.0f;
+float previousPositionErrorDeg = 0.0f;
+
 constexpr float POSITION_DEADBAND_DEG = 0.45f;
 constexpr float POSITION_EXIT_DEADBAND_DEG = 0.90f;
 constexpr float POSITION_DEADBAND_RPM = 1.20f;
 
-// ============================================================================
-// INNER SPEED PI
-// Preserves the previously tuned speed-loop defaults.
-// ============================================================================
-
-float speedKp = 2.0f;
-float speedKi = 5.0f;
-
-constexpr float MIN_SPEED_KP = 0.0f;
-constexpr float MAX_SPEED_KP = 10.0f;
-constexpr float MIN_SPEED_KI = 0.0f;
-constexpr float MAX_SPEED_KI = 50.0f;
-
-constexpr float SPEED_INTEGRAL_LIMIT = 300.0f;
-constexpr float MAX_PWM_COMMAND = 225.0f;
+long homePaddingPulses = 2;
+constexpr uint8_t POSITION_SETTLE_REQUIRED_SAMPLES = 5;
 
 // ============================================================================
 // TEST PROFILE
 // ============================================================================
 
 constexpr float MIN_TEST_OFFSET_DEG = 5.0f;
-constexpr float MAX_TEST_OFFSET_DEG = 30.0f;
+// No practical software test-angle ceiling; TEST=<deg> is user-controlled.
+constexpr float MAX_TEST_OFFSET_DEG = 1000000.0f;
 
-constexpr float SETUP_POSITION_KP = 0.65f;
-constexpr float SETUP_POSITION_KI = 0.00f;
-constexpr float SETUP_POSITION_KD = 0.025f;
-constexpr float SETUP_MAX_RPM = 15.0f;
+// Initial displacement uses a separate standard PID whose gains are supplied
+// by JMP from the best-scoring COMPLETED return trial so far.
+//
+// Run 1 has no previous winner, so JMP sends the current candidate as fallback.
+// From Run 2 onward these normally track the lowest-Score completed row.
+float setupKp = 4.0f;
+float setupKi = 0.0f;
+float setupKd = 0.30f;
 
 constexpr float TEST_OFFSET_TOLERANCE_DEG = 1.5f;
 constexpr float TEST_OFFSET_TOLERANCE_RPM = 2.0f;
 constexpr uint32_t TEST_OFFSET_SETTLE_MS = 350;
 constexpr uint32_t TEST_DWELL_MS = 500;
+constexpr uint32_t TEST_PREP_TIMEOUT_MS = 45000;
 constexpr uint32_t TEST_RETURN_SETTLE_MS = 1000;
-constexpr uint32_t TEST_RETURN_TIMEOUT_MS = 8000;
+constexpr uint32_t TEST_RETURN_TIMEOUT_MS = 45000;
 constexpr float TEST_HOME_TOLERANCE_DEG = 1.2f;
 constexpr float TEST_HOME_TOLERANCE_RPM = 1.5f;
 
@@ -142,8 +150,10 @@ constexpr float TEST_HOME_TOLERANCE_RPM = 1.5f;
 // SAFETY
 // ============================================================================
 
-constexpr float MAX_ALLOWED_POSITION_DEG = 75.0f;
-constexpr float MAX_ALLOWED_OUTPUT_RPM = 70.0f;
+// Legacy limit retained only for STATUS/source compatibility; automatic
+// position/RPM safety faulting is disabled in open-limits mode.
+constexpr float MAX_ALLOWED_POSITION_DEG = 1000000.0f;
+constexpr float MAX_ALLOWED_OUTPUT_RPM = 1000000.0f;
 constexpr float REVERSAL_SPEED_THRESHOLD_RPM = 1.5f;
 constexpr uint32_t REVERSAL_ZERO_WAIT_MS = 20;
 constexpr float STALL_ERROR_THRESHOLD_DEG = 3.0f;
@@ -207,6 +217,8 @@ long readEncoderAtomic()
 Mode mode = Mode::CALIBRATING;
 bool homed = false;
 bool positionDeadbandActive = false;
+bool positionSettledLatch = false;
+uint8_t positionSettleSamples = 0;
 
 unsigned long trialNumber = 0;
 
@@ -222,8 +234,6 @@ float positionErrorDeg = 0.0f;
 float positionIntegral = 0.0f;
 float targetOutputRPM = 0.0f;
 
-float speedErrorRPM = 0.0f;
-float speedIntegral = 0.0f;
 float appliedMotorCommand = 0.0f;
 
 uint32_t previousControlTime = 0;
@@ -242,7 +252,7 @@ uint8_t calibrationReversals = 0;
 uint32_t calibrationLastMotionAt = 0;
 
 // Test state.
-float testOffsetDeg = 20.0f;
+float testOffsetDeg = 300.0f;
 
 // Fault text is intentionally short for RAM safety.
 char faultCode[32] = "NONE";
@@ -287,10 +297,11 @@ void setMotorRaw(float command)
 void resetControllers()
 {
     positionIntegral = 0.0f;
-    speedIntegral = 0.0f;
+    previousPositionErrorDeg = 0.0f;
     targetOutputRPM = 0.0f;
-    speedErrorRPM = 0.0f;
     positionDeadbandActive = false;
+    positionSettledLatch = false;
+    positionSettleSamples = 0;
     reversalZeroStartedAt = 0;
     appliedDirection = 0;
     setMotorRaw(0.0f);
@@ -379,7 +390,22 @@ float countsToPositionDeg(long count)
            ENCODER_DIRECTION_SIGN;
 }
 
-void setCurrentPositionAsHome()
+bool persistentHomeValid()
+{
+    uint32_t storedMagic = 0;
+    EEPROM.get(EEPROM_HOME_MAGIC_ADDRESS, storedMagic);
+    return storedMagic == EEPROM_HOME_MAGIC;
+}
+
+void setPersistentHomeValid(bool valid)
+{
+    const uint32_t value =
+        valid ? EEPROM_HOME_MAGIC : 0UL;
+
+    EEPROM.put(EEPROM_HOME_MAGIC_ADDRESS, value);
+}
+
+void restoreCurrentPositionAsHomeAfterReset()
 {
     homeEncoderCount = readEncoderAtomic();
     homed = true;
@@ -387,11 +413,25 @@ void setCurrentPositionAsHome()
     resetControllers();
     enterMode(Mode::HOLD);
 
+    Serial.println("EVENT HOME_RESTORED");
+}
+
+void setCurrentPositionAsHome()
+{
+    homeEncoderCount = readEncoderAtomic();
+    homed = true;
+    targetPositionDeg = 0.0f;
+    resetControllers();
+    enterMode(Mode::HOLD);
+    setPersistentHomeValid(true);
+
     Serial.println("EVENT HOMED");
 }
 
 void beginCalibration()
 {
+    // Explicit recalibration invalidates any persisted home immediately.
+    setPersistentHomeValid(false);
     homed = false;
     resetControllers();
     enterMode(Mode::CALIBRATING);
@@ -406,6 +446,89 @@ void beginCalibration()
     Serial.println(
         "EVENT CALIBRATION_BEGIN move left/right, then hold at home"
     );
+}
+
+long targetEncoderCount()
+{
+    const float countOffset =
+        targetPositionDeg /
+        (DEGREES_PER_OUTPUT_COUNT * ENCODER_DIRECTION_SIGN);
+
+    return homeEncoderCount + lroundf(countOffset);
+}
+
+bool updatePositionSettledLatch(long currentCount, long deltaCount)
+{
+    const bool settlingAllowed =
+        homed &&
+        (mode == Mode::HOLD || mode == Mode::TEST_RETURN);
+
+    if (!settlingAllowed)
+    {
+        positionSettledLatch = false;
+        positionSettleSamples = 0;
+        return false;
+    }
+
+    const long errorCounts =
+        targetEncoderCount() - currentCount;
+
+    if (positionSettledLatch)
+    {
+        if (labs(errorCounts) > homePaddingPulses + 1)
+        {
+            positionSettledLatch = false;
+            positionSettleSamples = 0;
+        }
+        else
+        {
+            positionIntegral = 0.0f;
+            targetOutputRPM = 0.0f;
+            reversalZeroStartedAt = 0;
+            appliedDirection = 0;
+            setMotorRaw(0.0f);
+            return true;
+        }
+    }
+
+    const bool withinEncoderResolution =
+        labs(errorCounts) <= homePaddingPulses;
+
+    const bool noNewEncoderCount =
+        deltaCount == 0;
+
+    if (withinEncoderResolution && noNewEncoderCount)
+    {
+        if (positionSettleSamples < POSITION_SETTLE_REQUIRED_SAMPLES)
+        {
+            ++positionSettleSamples;
+        }
+
+        if (positionSettleSamples >= POSITION_SETTLE_REQUIRED_SAMPLES)
+        {
+            positionSettledLatch = true;
+            positionIntegral = 0.0f;
+            targetOutputRPM = 0.0f;
+            reversalZeroStartedAt = 0;
+            appliedDirection = 0;
+            setMotorRaw(0.0f);
+
+            // A successful HOLD settle at zero is safe to persist again.
+            // This allows later serial opens to recover after a timed-out run.
+            if (mode == Mode::HOLD && fabsf(targetPositionDeg) < 0.001f)
+            {
+                setPersistentHomeValid(true);
+            }
+
+            return true;
+        }
+    }
+    else
+    {
+        positionSettleSamples = 0;
+    }
+
+    return false;
 }
 
 void updateCalibration(long currentCount, long deltaCount, uint32_t now)
@@ -463,26 +586,37 @@ void updateCalibration(long currentCount, long deltaCount, uint32_t now)
 // CONTROLLERS
 // ============================================================================
 
-float calculatePositionSpeedTarget(
+float calculateDirectPositionPWM(
     float errorDeg,
     float outputPositionVelocityDegPerSec,
     float dt,
     bool useSetupController
 )
 {
+    // Both legs use the same standard PID architecture.
+    //
+    // TEST_OUT / TEST_DWELL:
+    //   best completed PID supplied by JMP -> PWM
+    //
+    // TEST_RETURN:
+    //   current candidate PID -> PWM
+    //
+    // The controller state is reset before TEST_RETURN, so setup integral
+    // history cannot contaminate the scored return.
+
     const float kp =
-        useSetupController ? SETUP_POSITION_KP : positionKp;
+        useSetupController ? setupKp : positionKp;
 
     const float ki =
-        useSetupController ? SETUP_POSITION_KI : positionKi;
+        useSetupController ? setupKi : positionKi;
 
     const float kd =
-        useSetupController ? SETUP_POSITION_KD : positionKd;
+        useSetupController ? setupKd : positionKd;
 
-    const float rpmLimit =
-        useSetupController ? SETUP_MAX_RPM : maximumReturnRPM;
+    targetOutputRPM = 0.0f;
 
-    // Hysteretic deadband for normal home holding.
+    // Do not use the normal home deadband while placing the mechanism at the
+    // test offset. The setup state machine has its own offset tolerance.
     if (!useSetupController)
     {
         if (
@@ -511,69 +645,105 @@ float calculatePositionSpeedTarget(
     else
     {
         positionDeadbandActive = false;
+
+        // Once inside the offset tolerance, stop driving and let TEST_OUT's
+        // settle timer decide when the displacement is ready.
+        if (fabsf(errorDeg) <= TEST_OFFSET_TOLERANCE_DEG)
+        {
+            positionIntegral = 0.0f;
+            return 0.0f;
+        }
     }
 
-    const float proposedIntegral = constrain(
-        positionIntegral + errorDeg * dt,
-        -POSITION_INTEGRAL_LIMIT,
-        POSITION_INTEGRAL_LIMIT
-    );
+    const bool crossedTarget =
+        previousPositionErrorDeg != 0.0f &&
+        (
+            (errorDeg > 0.0f && previousPositionErrorDeg < 0.0f) ||
+            (errorDeg < 0.0f && previousPositionErrorDeg > 0.0f)
+        );
 
-    const float proposedRPM =
-        kp * errorDeg +
-        ki * proposedIntegral -
-        kd * outputPositionVelocityDegPerSec;
-
-    const bool notSaturated =
-        proposedRPM < rpmLimit &&
-        proposedRPM > -rpmLimit;
-
-    if (notSaturated)
+    if (crossedTarget)
     {
-        positionIntegral = proposedIntegral;
+        positionIntegral = 0.0f;
     }
 
-    const float rpmCommand =
+    previousPositionErrorDeg = errorDeg;
+
+    // Same anti-windup/integral-separation logic for setup and return.
+    if (
+        fabsf(errorDeg) > POSITION_I_ENABLE_BAND_DEG ||
+        ki <= 0.0f
+    )
+    {
+        if (ki <= 0.0f)
+        {
+            positionIntegral = 0.0f;
+        }
+        else
+        {
+            const float bleed =
+                constrain(POSITION_I_BLEED_PER_SEC * dt, 0.0f, 1.0f);
+
+            positionIntegral *= (1.0f - bleed);
+        }
+    }
+    else
+    {
+        const float proposedIntegral =
+            constrain(
+                positionIntegral + errorDeg * dt,
+                -POSITION_INTEGRAL_LIMIT,
+                POSITION_INTEGRAL_LIMIT
+            );
+
+        const float proposedPWM =
+            kp * errorDeg +
+            ki * proposedIntegral -
+            kd * outputPositionVelocityDegPerSec;
+
+        const bool insideLimit =
+            proposedPWM < maximumReturnPWM &&
+            proposedPWM > -maximumReturnPWM;
+
+        const bool unwindPositive =
+            proposedPWM >= maximumReturnPWM && errorDeg < 0.0f;
+
+        const bool unwindNegative =
+            proposedPWM <= -maximumReturnPWM && errorDeg > 0.0f;
+
+        if (insideLimit || unwindPositive || unwindNegative)
+        {
+            positionIntegral = proposedIntegral;
+        }
+    }
+
+    float command =
         kp * errorDeg +
         ki * positionIntegral -
         kd * outputPositionVelocityDegPerSec;
 
-    return constrain(rpmCommand, -rpmLimit, rpmLimit);
-}
+    command =
+        constrain(
+            command,
+            -maximumReturnPWM,
+            maximumReturnPWM
+        );
 
-float calculateSpeedPWM(float rpmTarget, float dt)
-{
-    speedErrorRPM = rpmTarget - measuredOutputRPM;
-
-    if (fabsf(rpmTarget) < 0.01f)
-    {
-        speedIntegral = 0.0f;
-        return 0.0f;
-    }
-
-    const float proposedIntegral = constrain(
-        speedIntegral + speedErrorRPM * dt,
-        -SPEED_INTEGRAL_LIMIT,
-        SPEED_INTEGRAL_LIMIT
-    );
-
-    const float proposedCommand =
-        speedKp * speedErrorRPM +
-        speedKi * proposedIntegral;
-
+    // Preserve the configurable breakaway floor on both setup and return.
     if (
-        proposedCommand < MAX_PWM_COMMAND &&
-        proposedCommand > -MAX_PWM_COMMAND
+        minimumDrivePWM > 0.0f &&
+        fabsf(errorDeg) > 0.0f &&
+        fabsf(command) > 0.0f &&
+        fabsf(command) < minimumDrivePWM
     )
     {
-        speedIntegral = proposedIntegral;
+        command =
+            command > 0.0f
+                ? minimumDrivePWM
+                : -minimumDrivePWM;
     }
 
-    return constrain(
-        speedKp * speedErrorRPM + speedKi * speedIntegral,
-        -MAX_PWM_COMMAND,
-        MAX_PWM_COMMAND
-    );
+    return command;
 }
 
 // ============================================================================
@@ -588,14 +758,15 @@ void beginTest(float requestedOffsetDeg)
         return;
     }
 
-    if (
-        fabsf(requestedOffsetDeg) < MIN_TEST_OFFSET_DEG ||
-        fabsf(requestedOffsetDeg) > MAX_TEST_OFFSET_DEG
-    )
+    if (!isfinite(requestedOffsetDeg) || fabsf(requestedOffsetDeg) < 0.001f)
     {
-        Serial.println("ERR TEST_OFFSET_OUT_OF_RANGE");
+        Serial.println("ERR INVALID_TEST_OFFSET");
         return;
     }
+
+    // From this point until a successful return completes, a reboot must NOT
+    // assume the current physical position is home.
+    setPersistentHomeValid(false);
 
     testOffsetDeg = requestedOffsetDeg;
     targetPositionDeg = testOffsetDeg;
@@ -633,7 +804,7 @@ void updateTestState(uint32_t now)
             conditionStartedAt = 0;
         }
 
-        if (now - modeEnteredAt > 7000)
+        if (now - modeEnteredAt > TEST_PREP_TIMEOUT_MS)
         {
             targetPositionDeg = 0.0f;
             resetControllers();
@@ -668,6 +839,7 @@ void updateTestState(uint32_t now)
             {
                 targetPositionDeg = 0.0f;
                 enterMode(Mode::HOLD);
+                setPersistentHomeValid(true);
                 Serial.println("EVENT TEST_COMPLETE");
             }
         }
@@ -735,6 +907,24 @@ void printStatus()
     Serial.print(" Homed=");
     Serial.print(homed ? 1 : 0);
 
+    Serial.print(" HomePad=");
+    Serial.print(homePaddingPulses);
+
+    Serial.print(" MinPWM=");
+    Serial.print(minimumDrivePWM, 3);
+
+    Serial.print(" SKP=");
+    Serial.print(setupKp, 6);
+
+    Serial.print(" SKI=");
+    Serial.print(setupKi, 6);
+
+    Serial.print(" SKD=");
+    Serial.print(setupKd, 6);
+
+    Serial.print(" Settled=");
+    Serial.print(positionSettledLatch ? 1 : 0);
+
     Serial.print(" KP=");
     Serial.print(positionKp, 6);
 
@@ -750,8 +940,14 @@ void printStatus()
     Serial.print(" PosTarget=");
     Serial.print(targetPositionDeg, 4);
 
-    Serial.print(" MaxRPM=");
-    Serial.print(maximumReturnRPM, 3);
+    Serial.print(" MaxPWM=");
+    Serial.print(maximumReturnPWM, 3);
+
+    Serial.print(" TestMax=");
+    Serial.print(MAX_TEST_OFFSET_DEG, 1);
+
+    Serial.print(" DegPerCount=");
+    Serial.print(DEGREES_PER_OUTPUT_COUNT, 5);
 
     Serial.print(" Fault=");
     Serial.print(mode == Mode::FAULT ? 1 : 0);
@@ -921,45 +1117,106 @@ void processSerialCommand(char *command)
         return;
     }
 
-    if (strcmp(key, "SP") == 0)
+    if (strcmp(key, "MAXPWM") == 0)
     {
-        if (value < MIN_SPEED_KP || value > MAX_SPEED_KP)
+        if (!isfinite(value))
         {
-            Serial.println("ERR SP_OUT_OF_RANGE");
+            Serial.println("ERR MAXPWM_INVALID");
             return;
         }
 
-        speedKp = value;
-        resetControllers();
-        acknowledgeGain("SP", speedKp);
+        maximumReturnPWM =
+            constrain(value, 0.0f, MAX_PWM_COMMAND);
+
+        Serial.print("ACK MAXPWM=");
+        Serial.println(maximumReturnPWM, 3);
         return;
     }
 
-    if (strcmp(key, "SI") == 0)
+    if (strcmp(key, "HOMEPAD") == 0)
     {
-        if (value < MIN_SPEED_KI || value > MAX_SPEED_KI)
+        if (!isfinite(value))
         {
-            Serial.println("ERR SI_OUT_OF_RANGE");
+            Serial.println("ERR HOMEPAD_INVALID");
             return;
         }
 
-        speedKi = value;
-        resetControllers();
-        acknowledgeGain("SI", speedKi);
+        long requestedPadding = lroundf(value);
+
+        if (requestedPadding < 0)
+        {
+            requestedPadding = 0;
+        }
+
+        homePaddingPulses = requestedPadding;
+        positionSettledLatch = false;
+        positionSettleSamples = 0;
+
+        Serial.print("ACK HOMEPAD=");
+        Serial.println(homePaddingPulses);
         return;
     }
 
-    if (strcmp(key, "MAXRPM") == 0)
+    if (strcmp(key, "MINPWM") == 0)
     {
-        if (value < MIN_RETURN_RPM || value > MAX_RETURN_RPM)
+        if (!isfinite(value))
         {
-            Serial.println("ERR MAXRPM_OUT_OF_RANGE");
+            Serial.println("ERR MINPWM_INVALID");
             return;
         }
 
-        maximumReturnRPM = value;
-        Serial.print("ACK MAXRPM=");
-        Serial.println(maximumReturnRPM, 3);
+        minimumDrivePWM = constrain(value, 0.0f, MAX_PWM_COMMAND);
+
+        Serial.print("ACK MINPWM=");
+        Serial.println(minimumDrivePWM, 3);
+        return;
+    }
+
+    if (strcmp(key, "SKP") == 0)
+    {
+        if (!isfinite(value) ||
+            value < MIN_POSITION_KP ||
+            value > MAX_POSITION_KP)
+        {
+            Serial.println("ERR SKP_OUT_OF_RANGE");
+            return;
+        }
+
+        setupKp = value;
+        Serial.print("ACK SKP=");
+        Serial.println(setupKp, 6);
+        return;
+    }
+
+    if (strcmp(key, "SKI") == 0)
+    {
+        if (!isfinite(value) ||
+            value < MIN_POSITION_KI ||
+            value > MAX_POSITION_KI)
+        {
+            Serial.println("ERR SKI_OUT_OF_RANGE");
+            return;
+        }
+
+        setupKi = value;
+        Serial.print("ACK SKI=");
+        Serial.println(setupKi, 6);
+        return;
+    }
+
+    if (strcmp(key, "SKD") == 0)
+    {
+        if (!isfinite(value) ||
+            value < MIN_POSITION_KD ||
+            value > MAX_POSITION_KD)
+        {
+            Serial.println("ERR SKD_OUT_OF_RANGE");
+            return;
+        }
+
+        setupKd = value;
+        Serial.print("ACK SKD=");
+        Serial.println(setupKd, 6);
         return;
     }
 
@@ -968,12 +1225,6 @@ void processSerialCommand(char *command)
         if (!homed)
         {
             Serial.println("ERR NOT_HOMED");
-            return;
-        }
-
-        if (fabsf(value) > MAX_ALLOWED_POSITION_DEG)
-        {
-            Serial.println("ERR POS_OUT_OF_RANGE");
             return;
         }
 
@@ -1099,14 +1350,26 @@ void printTelemetry(
     Serial.print(" MotorRPM=");
     Serial.print(measuredMotorRPM, 1);
 
-    Serial.print(" SpeedError=");
-    Serial.print(speedErrorRPM, 3);
-
     Serial.print(" Counts=");
     Serial.print(currentCount);
 
     Serial.print(" dC=");
     Serial.print(deltaCount);
+
+    Serial.print(" ErrCounts=");
+    Serial.print(targetEncoderCount() - currentCount);
+
+    Serial.print(" HomePad=");
+    Serial.print(homePaddingPulses);
+
+    Serial.print(" SKP=");
+    Serial.print(setupKp, 4);
+
+    Serial.print(" SKI=");
+    Serial.print(setupKi, 4);
+
+    Serial.print(" SKD=");
+    Serial.print(setupKd, 4);
 
     Serial.print(" PWM=");
     Serial.println(appliedMotorCommand, 1);
@@ -1150,11 +1413,19 @@ void setup()
 
     Serial.println(
         "Commands: IDENTIFY, STATUS, CALIBRATE, ZERO, HOLD, STOP, "
-        "KP=<>, KI=<>, KD=<>, SP=<>, SI=<>, MAXRPM=<>, POS=<>, "
+        "KP=<>, KI=<>, KD=<>, SKP=<>, SKI=<>, SKD=<>, MAXPWM=<>, HOMEPAD=<pulses>, MINPWM=<>, POS=<>, "
         "TEST=<deg>, TRIAL=<>, TELEM=0|1|2"
     );
 
-    beginCalibration();
+    if (persistentHomeValid())
+    {
+        restoreCurrentPositionAsHomeAfterReset();
+    }
+    else
+    {
+        beginCalibration();
+    }
+
     printStatus();
 }
 
@@ -1217,64 +1488,39 @@ void loop()
     {
         updateTestState(now);
 
-        if (
-            fabsf(currentPositionDeg) > MAX_ALLOWED_POSITION_DEG ||
-            fabsf(measuredOutputRPM) > MAX_ALLOWED_OUTPUT_RPM
-        )
         {
-            enterFault("LIMIT");
-        }
-        else
-        {
-            const bool useSetupController =
-                mode == Mode::TEST_OUT ||
-                mode == Mode::TEST_DWELL;
+            const bool settledAndMotorOff =
+                updatePositionSettledLatch(currentCount, deltaCount);
 
-            const float positionVelocityDegPerSec =
-                measuredOutputRPM * 6.0f;
-
-            targetOutputRPM =
-                calculatePositionSpeedTarget(
-                    positionErrorDeg,
-                    positionVelocityDegPerSec,
-                    dt,
-                    useSetupController
-                );
-
-            float desiredPWM =
-                calculateSpeedPWM(targetOutputRPM, dt);
-
-            desiredPWM =
-                applyReversalInterlock(desiredPWM, now);
-
-            setMotorRaw(desiredPWM);
-
-            // Stall protection only when the controller is asking for motion
-            // because a static holding torque is valid near home.
-            const bool stallProtectionEnabled =
-                mode == Mode::TEST_OUT ||
-                mode == Mode::TEST_RETURN;
-
-            const bool possibleStall =
-                stallProtectionEnabled &&
-                fabsf(positionErrorDeg) >= STALL_ERROR_THRESHOLD_DEG &&
-                fabsf(appliedMotorCommand) >= STALL_PWM_THRESHOLD &&
-                deltaCount == 0;
-
-            if (possibleStall)
+            if (settledAndMotorOff)
             {
-                if (stallStartedAt == 0)
-                {
-                    stallStartedAt = now;
-                }
-
-                if (now - stallStartedAt >= STALL_TIMEOUT_MS)
-                {
-                    enterFault("STALL");
-                }
+                stallStartedAt = 0;
             }
             else
             {
+                const bool useSetupController =
+                    mode == Mode::TEST_OUT ||
+                    mode == Mode::TEST_DWELL;
+
+                const float positionVelocityDegPerSec =
+                    measuredOutputRPM * 6.0f;
+
+                float desiredPWM =
+                    calculateDirectPositionPWM(
+                        positionErrorDeg,
+                        positionVelocityDegPerSec,
+                        dt,
+                        useSetupController
+                    );
+
+                desiredPWM =
+                    applyReversalInterlock(desiredPWM, now);
+
+                setMotorRaw(desiredPWM);
+
+                // Open-limits mode: do not fault on aggressive motion,
+                // overshoot, high RPM, large displacement, or stall.
+                // Record the response and let JMP score it instead.
                 stallStartedAt = 0;
             }
         }
@@ -1294,9 +1540,12 @@ void loop()
     else if (telemetryMode == TelemetryMode::HUMAN)
     {
         const bool worthShowing =
-            fabsf(positionErrorDeg) >= 0.9f ||
-            fabsf(measuredOutputRPM) >= 1.0f ||
-            fabsf(appliedMotorCommand) >= 1.0f;
+            !positionSettledLatch &&
+            (
+                fabsf(positionErrorDeg) >= 0.9f ||
+                fabsf(measuredOutputRPM) >= 1.0f ||
+                fabsf(appliedMotorCommand) >= 1.0f
+            );
 
         if (worthShowing && ++humanTelemetryDivider >= HUMAN_TELEMETRY_DIVIDER)
         {
