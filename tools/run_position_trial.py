@@ -14,7 +14,7 @@ from pathlib import Path
 import serial
 from serial import SerialException
 
-EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.4-300deg-10xrange"
+EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.5-smooth-return"
 SERIAL_FLOAT_TOL = 1e-3
 ACK_RETRIES = 3
 ACK_TIMEOUT_SECONDS = 2.0
@@ -429,7 +429,7 @@ def write_result(
     settling_for_score = settling if settling is not None else a.max_settling_seconds
     score = (
         2.0 * settling_for_score + 1.0 * overshoot + 0.5 * oscillations
-        + 1.0 * chatter + 0.01 * iae + 0.25 * final_error
+        + 4.0 * chatter + 0.01 * iae + 0.25 * final_error
         + (25.0 if timed_out else 0.0) + (500.0 if abnormal else 0.0)
     )
     if not math.isfinite(score):
