@@ -1,0 +1,15 @@
+{
+  "profileName": "Direct PID / 300-degree Bayesian study",
+  "latestBranch": "position-directpid-300deg",
+  "latestRemote": "origin",
+  "defaultRemote": "origin",
+  "defaultPort": "COM7",
+  "firmwareId": "DiscoveryPID direct-position-pid-v3.3-300deg 2026-08-17",
+  "studyName": "PositionStudy_DirectPID_v37_300DegWide",
+  "testOffsetDeg": 300.0,
+  "pidRanges": {
+    "kp": [0.5, 100.0],
+    "ki": [0.0, 50.0],
+    "kd": [0.0, 20.0]
+  }
+}
