@@ -22,7 +22,7 @@
 #include <string.h>
 
 const char FIRMWARE_VERSION[] =
-    "DiscoveryPID direct-position-pid-v3.4-300deg-10xrange 2026-08-18";
+    "DiscoveryPID direct-position-pid-v3.5-smooth-return 2026-08-19";
 
 // Preserve a known-good home across the USB serial reset that can occur when
 // JMP opens COM7. We store only a validity marker, not an encoder count.
@@ -59,7 +59,7 @@ constexpr float DEGREES_PER_OUTPUT_COUNT =
 // ============================================================================
 
 constexpr uint32_t CONTROL_INTERVAL_MS = 10;
-constexpr uint8_t TELEMETRY_DIVIDER = 10;  // FAST mode: about 10 rows/second.
+constexpr uint8_t TELEMETRY_DIVIDER = 5;   // FAST mode: about 20 rows/second.
 constexpr uint8_t HUMAN_TELEMETRY_DIVIDER = 50; // HUMAN mode: about 2 rows/second.
 
 enum class TelemetryMode : uint8_t
@@ -106,6 +106,16 @@ constexpr float MAX_PWM_COMMAND = 225.0f;
 float maximumReturnPWM = 225.0f;
 
 float minimumDrivePWM = 60.0f;
+
+// Keep the strong breakaway floor while far from home, but fade it away on
+// the final approach. This prevents the old forced +/-60 behavior from
+// repeatedly kicking the mechanism across zero.
+constexpr float RETURN_MIN_PWM_TAPER_START_DEG = 12.0f;
+constexpr float RETURN_MIN_PWM_TAPER_END_DEG = 1.0f;
+
+// Encoder velocity is quantized at the 10 ms control rate. A little more
+// filtering keeps the derivative term from reacting to single-count jumps.
+constexpr float OUTPUT_RPM_FILTER_ALPHA = 0.15f;
 
 constexpr float POSITION_INTEGRAL_LIMIT = 80.0f;
 constexpr float POSITION_I_ENABLE_BAND_DEG = 10.0f;
@@ -729,18 +739,40 @@ float calculateDirectPositionPWM(
             maximumReturnPWM
         );
 
-    // Preserve the configurable breakaway floor on both setup and return.
+    float effectiveMinimumDrivePWM = minimumDrivePWM;
+
+    if (!useSetupController && minimumDrivePWM > 0.0f)
+    {
+        const float absErrorDeg = fabsf(errorDeg);
+
+        if (absErrorDeg <= RETURN_MIN_PWM_TAPER_END_DEG)
+        {
+            effectiveMinimumDrivePWM = 0.0f;
+        }
+        else if (absErrorDeg < RETURN_MIN_PWM_TAPER_START_DEG)
+        {
+            const float taper =
+                (absErrorDeg - RETURN_MIN_PWM_TAPER_END_DEG) /
+                (RETURN_MIN_PWM_TAPER_START_DEG - RETURN_MIN_PWM_TAPER_END_DEG);
+
+            effectiveMinimumDrivePWM = minimumDrivePWM * taper;
+        }
+    }
+
+    // Setup still gets the full breakaway floor. On the scored return, the
+    // floor fades from MINPWM at 12 deg to zero at 1 deg, letting the PID
+    // smoothly decelerate instead of repeatedly snapping to +/-MINPWM.
     if (
-        minimumDrivePWM > 0.0f &&
+        effectiveMinimumDrivePWM > 0.0f &&
         fabsf(errorDeg) > 0.0f &&
         fabsf(command) > 0.0f &&
-        fabsf(command) < minimumDrivePWM
+        fabsf(command) < effectiveMinimumDrivePWM
     )
     {
         command =
             command > 0.0f
-                ? minimumDrivePWM
-                : -minimumDrivePWM;
+                ? effectiveMinimumDrivePWM
+                : -effectiveMinimumDrivePWM;
     }
 
     return command;
@@ -1461,10 +1493,11 @@ void loop()
 
     rawOutputRPM = measuredMotorRPM / GEAR_RATIO;
 
-    // Low-pass the quantized 10 ms encoder-speed estimate.
+    // Low-pass the quantized 10 ms encoder-speed estimate. The smaller alpha
+    // reduces derivative chatter while preserving enough response for braking.
     measuredOutputRPM =
-        0.75f * measuredOutputRPM +
-        0.25f * rawOutputRPM;
+        (1.0f - OUTPUT_RPM_FILTER_ALPHA) * measuredOutputRPM +
+        OUTPUT_RPM_FILTER_ALPHA * rawOutputRPM;
 
     const float currentPositionDeg =
         homed ? countsToPositionDeg(currentCount) : 0.0f;
