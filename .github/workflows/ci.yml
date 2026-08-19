@@ -62,21 +62,27 @@ jobs:
           assert cfg['latestBranch'] == 'main'
           assert cfg['defaultPort'] == 'COM7'
           assert cfg['testOffsetDeg'] == 300.0
-          assert cfg['pidRanges']['kp'] == [0.5, 100.0]
-          assert cfg['pidRanges']['ki'] == [0.0, 50.0]
-          assert cfg['pidRanges']['kd'] == [0.0, 20.0]
+          assert cfg['pidRanges']['kp'] == [0.5, 1000.0]
+          assert cfg['pidRanges']['ki'] == [0.0, 500.0]
+          assert cfg['pidRanges']['kd'] == [0.0, 200.0]
 
-          assert 'direct-position-pid-v3.3-300deg' in fw
+          assert 'direct-position-pid-v3.4-300deg-10xrange' in fw
+          assert 'MAX_POSITION_KP = 1000.0f' in fw
+          assert 'MAX_POSITION_KI = 500.0f' in fw
+          assert 'MAX_POSITION_KD = 200.0f' in fw
           assert 'COUNTS_PER_MOTOR_REV = 56.0f' in fw
           assert 'TEST_PREP_TIMEOUT_MS = 45000' in fw
           assert 'TEST_RETURN_TIMEOUT_MS = 45000' in fw
-          assert 'EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.3-300deg"' in py
+          assert 'EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.4-300deg-10xrange"' in py
           assert 'default=300.0' in py
           assert 'default=60.0' in py
+          assert 'studyName = "PositionStudy_DirectPID_v38_300Deg10xRange";' in jsl
           assert 'testOffsetDeg = 300.0;' in jsl
-          assert 'kpHigh = 100.0;' in jsl
-          assert 'kiHigh = 50.0;' in jsl
-          assert 'kdHigh = 20.0;' in jsl
+          assert 'kpHigh = 1000.0;' in jsl
+          assert 'kiHigh = 500.0;' in jsl
+          assert 'kdHigh = 200.0;' in jsl
+          assert '{100.0,   50.0,  20.00}' in jsl
+          assert '{1000.0, 500.0, 200.00}' in jsl
           assert 'EVENT TEST_RETURN' in jsl
           assert 'cmdExecutable' not in jsl
           PY
