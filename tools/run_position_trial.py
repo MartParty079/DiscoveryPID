@@ -399,7 +399,7 @@ def write_result(
     abnormal = status not in {"COMPLETE", "TEST_TIMEOUT", "TEST_PREP_TIMEOUT", "TEST_SETTLING_TIMEOUT"}
     settling_for_score = settling if settling is not None else a.max_settling_seconds
     score = (
-        10.0 * settling_for_score + 0.25 * overshoot + 0.25 * oscillations
+        2.0 * settling_for_score + 1.0 * overshoot + 0.5 * oscillations
         + 0.01 * iae + 0.25 * final_error
         + (25.0 if timed_out else 0.0) + (500.0 if abnormal else 0.0)
     )
