@@ -112,6 +112,17 @@ $text = $text.Replace(
     '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\!N" || "PID coefficient increment: 0.5\!N" ||'
 )
 
+# A transient serial/configuration failure should invalidate one run, not kill
+# the entire Bayesian study. The worker already writes a finite CONTROL_ERROR_
+# result row. Remove the template's special hard-stop block so that row falls
+# through to the normal trial-warning path and the next run can proceed.
+$text = [regex]::Replace(
+    $text,
+    '(?s)\s*If\(\s*Contains\( statusText, "CONTROL_ERROR_" \) == 1,.*?Throw\( statusText \);\s*\);\s*(?=\s*If\(\s*Is Missing\( scoreValue \))',
+    "`r`n",
+    1
+)
+
 # Normalize the quote helper in case a JSL copy was produced through a JSON
 # transport that escaped its embedded quote one extra time.
 $text = $text.Replace('    "\!\"" || Char( value ) || "\!\""', '    "\!"" || Char( value ) || "\!""')
@@ -125,5 +136,7 @@ $text = $text.Replace('    "\!\"" || Char( value ) || "\!\""', '    "\!"" || Cha
 Write-Host "Launching JMP runtime study" -ForegroundColor Cyan
 Write-Host "  Port: $Port"
 Write-Host "  PID step: 0.5"
+Write-Host "  Serial ACK retries: 3"
+Write-Host "  Control errors: warn + continue"
 Write-Host "  Runtime JSL: $runtimeScript"
 Invoke-Item $runtimeScript
