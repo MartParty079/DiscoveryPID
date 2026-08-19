@@ -1,11 +1,11 @@
 {
-  "profileName": "Direct PID / 300-degree Bayesian study - 10x PID range / 3 s settling max",
+  "profileName": "Direct PID / 300-degree Bayesian study - 10x PID range / 3 s settling max / 0.5 PID steps",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
   "firmwareId": "DiscoveryPID direct-position-pid-v3.4-300deg-10xrange 2026-08-18",
-  "studyName": "PositionStudy_DirectPID_v39_300Deg10xRange_3s",
+  "studyName": "PositionStudy_DirectPID_v40_300Deg10xRange_3s_HalfStep",
   "testOffsetDeg": 300.0,
   "pidRanges": {
     "kp": [
@@ -21,5 +21,6 @@
       200.0
     ]
   },
-  "maxSettlingTimeSeconds": 3.0
+  "maxSettlingTimeSeconds": 3.0,
+  "pidCoefficientStep": 0.5
 }
