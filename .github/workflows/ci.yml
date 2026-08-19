@@ -88,6 +88,10 @@ jobs:
           assert 'def round_half' in half
           assert 'math.floor(value * 2.0 + 0.5) / 2.0' in half
           assert '"--kp"' in half and '"--setup-kd"' in half
+          assert 'ACK_RETRIES = 3' in half
+          assert 'def install_ack_retry' in half
+          assert 'Missing acknowledgement:' in half
+          assert 'ERR UNKNOWN_COMMAND' in half
 
           assert 'studyName = "PositionStudy_DirectPID_v39_300Deg10xRange_3s";' in jsl
           assert 'maxSettlingTimeSeconds = 3.0;' in jsl
@@ -103,6 +107,9 @@ jobs:
           assert 'proposedKp = Round(' in launcher
           assert 'Column( dt, "KP" )[newRow] = proposedKp;' in launcher
           assert 'PositionStudy_DirectPID_v40_300Deg10xRange_3s_HalfStep' in launcher
+          assert 'Serial ACK retries: 3' in launcher
+          assert 'Control errors: warn + continue' in launcher
+          assert 'CONTROL_ERROR_' in launcher
           PY
 
       - name: Build Mega firmware
