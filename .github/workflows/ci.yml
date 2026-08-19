@@ -21,7 +21,7 @@ jobs:
 
       - name: Compile Python tools
         run: |
-          python -m py_compile tools/run_position_trial.py tools/home_position.py
+          python -m py_compile tools/run_position_trial.py tools/run_position_trial_halfstep.py tools/home_position.py
 
       - name: Parse PowerShell helpers
         shell: pwsh
@@ -56,7 +56,9 @@ jobs:
 
           fw = Path('src/main.cpp').read_text()
           py = Path('tools/run_position_trial.py').read_text()
+          half = Path('tools/run_position_trial_halfstep.py').read_text()
           jsl = Path('jmp/DiscoveryPID_Position_V2.jsl').read_text()
+          launcher = Path('scripts/position_v2/open_jmp.ps1').read_text()
           cfg = json.loads(Path('config/discoverypid.json').read_text())
 
           assert cfg['latestBranch'] == 'main'
@@ -66,6 +68,8 @@ jobs:
           assert cfg['pidRanges']['ki'] == [0.0, 500.0]
           assert cfg['pidRanges']['kd'] == [0.0, 200.0]
           assert cfg['maxSettlingTimeSeconds'] == 3.0
+          assert cfg['pidCoefficientStep'] == 0.5
+          assert cfg['studyName'] == 'PositionStudy_DirectPID_v40_300Deg10xRange_3s_HalfStep'
 
           assert 'direct-position-pid-v3.4-300deg-10xrange' in fw
           assert 'MAX_POSITION_KP = 1000.0f' in fw
@@ -74,22 +78,31 @@ jobs:
           assert 'COUNTS_PER_MOTOR_REV = 56.0f' in fw
           assert 'TEST_PREP_TIMEOUT_MS = 45000' in fw
           assert 'TEST_RETURN_TIMEOUT_MS = 45000' in fw
+
           assert 'EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.4-300deg-10xrange"' in py
           assert 'default=300.0' in py
           assert 'default=60.0' in py
           assert '"--max-settling-seconds", type=float, default=3.0' in py
           assert 'status = "TEST_SETTLING_TIMEOUT"' in py
+
+          assert 'def round_half' in half
+          assert 'math.floor(value * 2.0 + 0.5) / 2.0' in half
+          assert '"--kp"' in half and '"--setup-kd"' in half
+
           assert 'studyName = "PositionStudy_DirectPID_v39_300Deg10xRange_3s";' in jsl
           assert 'maxSettlingTimeSeconds = 3.0;' in jsl
-          assert '"--max-settling-seconds", Char( maxSettlingTimeSeconds )' in jsl
           assert 'testOffsetDeg = 300.0;' in jsl
           assert 'kpHigh = 1000.0;' in jsl
           assert 'kiHigh = 500.0;' in jsl
           assert 'kdHigh = 200.0;' in jsl
-          assert '{100.0,   50.0,  20.00}' in jsl
-          assert '{1000.0, 500.0, 200.00}' in jsl
           assert 'EVENT TEST_RETURN' in jsl
           assert 'cmdExecutable' not in jsl
+
+          assert 'run_position_trial_halfstep.py' in launcher
+          assert 'PID step: 0.5' in launcher
+          assert 'proposedKp = Round(' in launcher
+          assert 'Column( dt, "KP" )[newRow] = proposedKp;' in launcher
+          assert 'PositionStudy_DirectPID_v40_300Deg10xRange_3s_HalfStep' in launcher
           PY
 
       - name: Build Mega firmware
