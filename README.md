@@ -6,12 +6,12 @@ Arduino Mega 2560 position-control testbed with JMP Bayesian PID optimization.
 
 The repository default branch, `main`, is the current supported **Direct PID / 300-degree Bayesian study**.
 
-- firmware: `DiscoveryPID direct-position-pid-v3.3-300deg 2026-08-17`
+- firmware: `DiscoveryPID direct-position-pid-v3.4-300deg-10xrange 2026-08-18`
 - default/latest branch: `main`
 - test displacement: **300 deg**
-- Kp search: **0.5 to 100**
-- Ki search: **0 to 50**
-- Kd search: **0 to 20**
+- Kp search: **0.5 to 1000**
+- Ki search: **0 to 500**
+- Kd search: **0 to 200**
 
 The scored return controller is a single standard position PID that outputs PWM directly:
 
