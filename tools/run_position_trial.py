@@ -19,7 +19,7 @@ PAIR_RE = re.compile(
     r"([A-Za-z][A-Za-z0-9_]*)=(-?(?:\d+(?:\.\d*)?|\.\d+))"
 )
 
-EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.3-300deg"
+EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.4-300deg-10xrange"
 
 TELEMETRY_FIELDS = {
     "Trial",

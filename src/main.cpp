@@ -22,7 +22,7 @@
 #include <string.h>
 
 const char FIRMWARE_VERSION[] =
-    "DiscoveryPID direct-position-pid-v3.3-300deg 2026-08-17";
+    "DiscoveryPID direct-position-pid-v3.4-300deg-10xrange 2026-08-18";
 
 // Preserve a known-good home across the USB serial reset that can occur when
 // JMP opens COM7. We store only a validity marker, not an encoder count.
@@ -96,11 +96,11 @@ float positionKi = 0.0f;
 float positionKd = 0.30f;
 
 constexpr float MIN_POSITION_KP = 0.0f;
-constexpr float MAX_POSITION_KP = 100.0f;
+constexpr float MAX_POSITION_KP = 1000.0f;
 constexpr float MIN_POSITION_KI = 0.0f;
-constexpr float MAX_POSITION_KI = 100.0f;
+constexpr float MAX_POSITION_KI = 500.0f;
 constexpr float MIN_POSITION_KD = 0.0f;
-constexpr float MAX_POSITION_KD = 20.0f;
+constexpr float MAX_POSITION_KD = 200.0f;
 
 constexpr float MAX_PWM_COMMAND = 225.0f;
 float maximumReturnPWM = 225.0f;

@@ -18,7 +18,7 @@ if (-not (Test-Path $py)) {
 }
 
 # JMP's flat-session save path must exist before the JSL runs.
-$sessionDir = Join-Path $repo "data\position_autotune_directpid_v37_300degwide\sessions"
+$sessionDir = Join-Path $repo "data\position_autotune_directpid_v38_300deg10xrange\sessions"
 New-Item -ItemType Directory -Force $sessionDir | Out-Null
 
 # Build a runtime copy so collaborators do not need to edit machine-specific
