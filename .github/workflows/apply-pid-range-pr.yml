@@ -1,0 +1,41 @@
+name: Apply PID range patch on PR
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'pid-range-10x'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: pid-range-10x
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply patch
+        run: python tools/_apply_pid_range_10x.py
+
+      - name: Commit and clean temporary updater
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f \
+            .apply-pid-range-10x \
+            tools/_apply_pid_range_10x.py \
+            .github/workflows/apply-pid-range-10x.yml \
+            .github/workflows/apply-pid-range-pr.yml
+          git add -A
+          git commit -m "Expand direct PID search ranges by 10x"
+          git push origin HEAD:pid-range-10x
