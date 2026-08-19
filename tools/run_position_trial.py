@@ -29,9 +29,9 @@ TELEMETRY_FIELDS = {
 
 RESULT_HEADERS = [
     "Run", "KP", "KI", "KD", "Score", "Settling Time (s)",
-    "Return Timer Started", "Overshoot (deg)", "Oscillations", "IAE (deg*s)",
-    "Peak Output RPM", "Final Error (deg)", "Success", "Status", "Samples",
-    "Firmware", "Raw File",
+    "Return Timer Started", "Overshoot (deg)", "Oscillations", "PWM Chatter",
+    "IAE (deg*s)", "Peak Output RPM", "Final Error (deg)", "Success", "Status",
+    "Samples", "Firmware", "Raw File",
 ]
 
 RAW_HEADERS = [
@@ -345,6 +345,34 @@ def integrated_absolute_error(rows: list[dict[str, float | str]]) -> float:
     return result
 
 
+def pwm_chatter_penalty(
+    rows: list[dict[str, float | str]],
+    max_pwm: float,
+) -> float:
+    """Penalize pulsed/chattery control while allowing a hard, clean snap home.
+
+    The metric is normalized PWM total variation. A clean command that goes
+    0 -> drive -> 0 has normalized variation <= 2 and receives zero penalty.
+    Extra on/off pulses, repeated braking, or command reversals add penalty.
+    """
+    if not rows or not math.isfinite(max_pwm) or max_pwm <= 0.0:
+        return 0.0
+
+    commands = [0.0]
+    commands.extend(float(row["pwm"]) for row in rows)
+    commands.append(0.0)
+
+    total_variation = sum(
+        abs(current - previous)
+        for previous, current in zip(commands, commands[1:])
+    )
+    normalized_variation = total_variation / max_pwm
+
+    # Two units cover the ideal 0 -> drive -> 0 path. Only excess motion in
+    # the control command is treated as chatter.
+    return max(0.0, normalized_variation - 2.0)
+
+
 def write_raw(path: Path, rows: list[dict[str, float | str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as file:
@@ -388,6 +416,7 @@ def write_result(
     return_timer_started = int(bool(return_rows))
     settling = settling_time(return_rows, a.home_padding_pulses)
     overshoot, oscillations = overshoot_and_oscillations(return_rows)
+    chatter = pwm_chatter_penalty(return_rows, a.return_max_pwm)
     iae = integrated_absolute_error(return_rows)
     peak_rpm = max((abs(float(row["rpm"])) for row in return_rows), default=0.0)
     final_window = return_rows[-5:]
@@ -400,7 +429,7 @@ def write_result(
     settling_for_score = settling if settling is not None else a.max_settling_seconds
     score = (
         2.0 * settling_for_score + 1.0 * overshoot + 0.5 * oscillations
-        + 0.01 * iae + 0.25 * final_error
+        + 1.0 * chatter + 0.01 * iae + 0.25 * final_error
         + (25.0 if timed_out else 0.0) + (500.0 if abnormal else 0.0)
     )
     if not math.isfinite(score):
@@ -420,14 +449,15 @@ def write_result(
         writer.writerow([
             a.trial, f"{a.kp:.8f}", f"{a.ki:.8f}", f"{a.kd:.8f}", f"{score:.8f}",
             "" if settling is None else f"{settling:.8f}", return_timer_started,
-            f"{overshoot:.8f}", oscillations, f"{iae:.8f}", f"{peak_rpm:.8f}",
-            f"{final_error:.8f}", success, status, len(return_rows), firmware,
-            str(a.raw_file.resolve()),
+            f"{overshoot:.8f}", oscillations, f"{chatter:.8f}", f"{iae:.8f}",
+            f"{peak_rpm:.8f}", f"{final_error:.8f}", success, status, len(return_rows),
+            firmware, str(a.raw_file.resolve()),
         ])
     print(
         f"RESULT Run={a.trial} KP={a.kp:g} KI={a.ki:g} KD={a.kd:g} "
         f"Score={score:.6f} Settling={settling if settling is not None else 'MISSING'} "
-        f"ReturnTimerStarted={return_timer_started} Success={success} Status={status}",
+        f"Chatter={chatter:.4f} ReturnTimerStarted={return_timer_started} "
+        f"Success={success} Status={status}",
         flush=True,
     )
     return 0
