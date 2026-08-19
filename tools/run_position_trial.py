@@ -110,6 +110,7 @@ def arguments() -> argparse.Namespace:
     p.add_argument("--expected-firmware", default=EXPECTED_FW)
 
     p.add_argument("--overall-timeout", type=float, default=60.0)
+    p.add_argument("--max-settling-seconds", type=float, default=3.0)
 
     p.add_argument("--success-settling-seconds", type=float, default=1.0)
     p.add_argument("--success-overshoot-deg", type=float, default=5.0)
@@ -557,18 +558,23 @@ def write_result(
         else 999.0
     )
 
-    timed_out = status in {"TEST_TIMEOUT", "TEST_PREP_TIMEOUT"}
+    timed_out = status in {
+        "TEST_TIMEOUT",
+        "TEST_PREP_TIMEOUT",
+        "TEST_SETTLING_TIMEOUT",
+    }
 
     settling_for_score = (
         settling
         if settling is not None
-        else a.overall_timeout
+        else a.max_settling_seconds
     )
 
     abnormal_status = status not in {
         "COMPLETE",
         "TEST_TIMEOUT",
         "TEST_PREP_TIMEOUT",
+        "TEST_SETTLING_TIMEOUT",
     }
 
     # FAST-RETURN objective:
@@ -664,6 +670,7 @@ def main() -> int:
         and math.isfinite(a.setup_ki)
         and math.isfinite(a.setup_kd)
         and a.overall_timeout > 0.0
+        and a.max_settling_seconds > 0.0
     ):
         # Still emit a numeric result rather than killing the JMP study.
         rows: list[dict[str, float | str]] = []
@@ -696,9 +703,26 @@ def main() -> int:
 
         start = time.monotonic()
         return_start: float | None = None
+        settling_reached = False
         test_complete = False
 
         while time.monotonic() - start < a.overall_timeout:
+            if (
+                return_start is not None
+                and not settling_reached
+                and time.monotonic() - return_start >= a.max_settling_seconds
+            ):
+                status = "TEST_SETTLING_TIMEOUT"
+                test_complete = True
+                print(
+                    "ERROR: settling time exceeded "
+                    f"{a.max_settling_seconds:.3f} s without entering "
+                    f"+/-{a.home_padding_pulses} encoder counts; "
+                    "ending this trial and recovering home.",
+                    flush=True,
+                )
+                break
+
             line = port.readline().decode(
                 "utf-8",
                 errors="replace",
@@ -762,6 +786,17 @@ def main() -> int:
 
             now = time.monotonic()
             elapsed = now - start
+            return_time = (
+                -1.0
+                if return_start is None
+                else now - return_start
+            )
+
+            if (
+                return_time >= 0.0
+                and abs(values["ErrCounts"]) <= a.home_padding_pulses
+            ):
+                settling_reached = True
 
             rows.append(
                 {
@@ -769,11 +804,7 @@ def main() -> int:
                         "%Y-%m-%dT%H:%M:%S"
                     ),
                     "elapsed": elapsed,
-                    "return_time": (
-                        -1.0
-                        if return_start is None
-                        else now - return_start
-                    ),
+                    "return_time": return_time,
                     "trial": float(a.trial),
                     "mode": values["Mode"],
                     "kp": a.kp,
