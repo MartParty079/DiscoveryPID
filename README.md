@@ -4,10 +4,10 @@ Arduino Mega 2560 position-control testbed with JMP Bayesian PID optimization.
 
 ## Latest supported code
 
-The current supported profile is **Direct PID / 300-degree Bayesian study**.
+The repository default branch, `main`, is the current supported **Direct PID / 300-degree Bayesian study**.
 
 - firmware: `DiscoveryPID direct-position-pid-v3.3-300deg 2026-08-17`
-- development branch: `position-directpid-300deg`
+- default/latest branch: `main`
 - test displacement: **300 deg**
 - Kp search: **0.5 to 100**
 - Ki search: **0 to 50**

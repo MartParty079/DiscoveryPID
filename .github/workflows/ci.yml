@@ -59,7 +59,7 @@ jobs:
           jsl = Path('jmp/DiscoveryPID_Position_V2.jsl').read_text()
           cfg = json.loads(Path('config/discoverypid.json').read_text())
 
-          assert cfg['latestBranch'] == 'position-directpid-300deg'
+          assert cfg['latestBranch'] == 'main'
           assert cfg['defaultPort'] == 'COM7'
           assert cfg['testOffsetDeg'] == 300.0
           assert cfg['pidRanges']['kp'] == [0.5, 100.0]

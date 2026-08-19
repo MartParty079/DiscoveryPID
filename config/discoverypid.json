@@ -1,6 +1,6 @@
 {
   "profileName": "Direct PID / 300-degree Bayesian study",
-  "latestBranch": "position-directpid-300deg",
+  "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
