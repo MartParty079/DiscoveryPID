@@ -1,27 +1,44 @@
 # Position V2 helper scripts
 
-Run these from PowerShell. The scripts resolve the repository root from their own location, so the checkout can live anywhere.
+For normal use, start from the repository root with the interactive launcher:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-
-& ".\scripts\position_v2\build_upload.ps1"
-& ".\scripts\position_v2\home.ps1"
-& ".\scripts\position_v2\open_jmp.ps1"
+.\DiscoveryPID.ps1
 ```
 
-`home.ps1` forces a fresh `CALIBRATE`, waits for `EVENT HOMED`, and releases COM7 automatically.
+The launcher wraps these lower-level helpers and also provides branch/fork/port selection.
 
-`open_jmp.ps1` creates the session output directory and generates a temporary runtime JSL with checkout-specific Python/repository paths. This keeps the tracked JSL clean for collaboration.
+## Low-level commands
 
-Use the smaller 45-degree smoke test before a large-angle study if hardware has changed:
+Build and upload:
 
 ```powershell
-& ".\scripts\position_v2\smoke_test.ps1"
+& ".\scripts\position_v2\build_upload.ps1" -Port COM7
 ```
 
-The full physical test defaults to 300 degrees:
+Force a fresh home/calibration:
 
 ```powershell
-& ".\scripts\position_v2\control_test.ps1"
+& ".\scripts\position_v2\home.ps1" -Port COM7
 ```
+
+Launch JMP with runtime checkout/Python/COM-port substitution:
+
+```powershell
+& ".\scripts\position_v2\open_jmp.ps1" -Port COM7
+```
+
+Run the smaller hardware smoke test:
+
+```powershell
+& ".\scripts\position_v2\smoke_test.ps1" -Port COM7
+```
+
+Run the full physical test:
+
+```powershell
+& ".\scripts\position_v2\control_test.ps1" -Port COM7
+```
+
+The scripts resolve the repository root from their own locations, so the checkout can live anywhere. `open_jmp.ps1` generates a temporary runtime JSL rather than modifying the tracked JSL, keeping collaborator-specific paths and ports out of Git.

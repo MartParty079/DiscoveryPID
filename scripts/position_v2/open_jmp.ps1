@@ -1,3 +1,7 @@
+param(
+    [string]$Port = "COM7"
+)
+
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $sourceScript = Join-Path $repo "jmp\DiscoveryPID_Position_V2.jsl"
@@ -18,7 +22,7 @@ $sessionDir = Join-Path $repo "data\position_autotune_directpid_v37_300degwide\s
 New-Item -ItemType Directory -Force $sessionDir | Out-Null
 
 # Build a runtime copy so collaborators do not need to edit machine-specific
-# paths in the tracked JSL. The tracked file remains unchanged/clean in Git.
+# paths or serial ports in the tracked JSL. The tracked file remains clean.
 $runtimeScript = Join-Path $env:TEMP "DiscoveryPID_Position_V2_runtime.jsl"
 $text = Get-Content $sourceScript -Raw
 $repoJsl = ($repo -replace '\\', '/') + '/'
@@ -36,6 +40,12 @@ $text = [regex]::Replace(
     "pythonExecutable =`r`n    `"$pyJsl`";",
     1
 )
+$text = [regex]::Replace(
+    $text,
+    'portName\s*=\s*"[^"]*";',
+    "portName = `"$Port`";",
+    1
+)
 
 # Normalize the quote helper in case a JSL copy was produced through a JSON
 # transport that escaped its embedded quote one extra time.
@@ -47,4 +57,7 @@ $text = $text.Replace('    "\!\"" || Char( value ) || "\!\""', '    "\!"" || Cha
     (New-Object System.Text.UTF8Encoding($false))
 )
 
+Write-Host "Launching JMP runtime study" -ForegroundColor Cyan
+Write-Host "  Port: $Port"
+Write-Host "  Runtime JSL: $runtimeScript"
 Invoke-Item $runtimeScript

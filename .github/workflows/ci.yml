@@ -23,13 +23,49 @@ jobs:
         run: |
           python -m py_compile tools/run_position_trial.py tools/home_position.py
 
+      - name: Parse PowerShell helpers
+        shell: pwsh
+        run: |
+          $files = @(
+            "DiscoveryPID.ps1",
+            "scripts/position_v2/build_upload.ps1",
+            "scripts/position_v2/home.ps1",
+            "scripts/position_v2/open_jmp.ps1",
+            "scripts/position_v2/smoke_test.ps1",
+            "scripts/position_v2/control_test.ps1"
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | Format-List | Out-String | Write-Error
+              throw "PowerShell parse failed: $file"
+            }
+          }
+
       - name: Check current position-study configuration
         run: |
           python - <<'PY'
+          import json
           from pathlib import Path
+
           fw = Path('src/main.cpp').read_text()
           py = Path('tools/run_position_trial.py').read_text()
           jsl = Path('jmp/DiscoveryPID_Position_V2.jsl').read_text()
+          cfg = json.loads(Path('config/discoverypid.json').read_text())
+
+          assert cfg['latestBranch'] == 'position-directpid-300deg'
+          assert cfg['defaultPort'] == 'COM7'
+          assert cfg['testOffsetDeg'] == 300.0
+          assert cfg['pidRanges']['kp'] == [0.5, 100.0]
+          assert cfg['pidRanges']['ki'] == [0.0, 50.0]
+          assert cfg['pidRanges']['kd'] == [0.0, 20.0]
+
           assert 'direct-position-pid-v3.3-300deg' in fw
           assert 'COUNTS_PER_MOTOR_REV = 56.0f' in fw
           assert 'TEST_PREP_TIMEOUT_MS = 45000' in fw

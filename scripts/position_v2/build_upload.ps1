@@ -1,5 +1,6 @@
 param(
-    [switch]$NoClean
+    [switch]$NoClean,
+    [string]$Port = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,5 +23,11 @@ if (-not $NoClean) {
 & $pio run
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-& $pio run --target upload
+$uploadArgs = @("run", "--target", "upload")
+if ($Port) {
+    $uploadArgs += @("--upload-port", $Port)
+    Write-Host "Uploading to $Port" -ForegroundColor Cyan
+}
+
+& $pio @uploadArgs
 exit $LASTEXITCODE
