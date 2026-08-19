@@ -5,30 +5,28 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $sourceScript = Join-Path $repo "jmp\DiscoveryPID_Position_V2.jsl"
-$workerScript = Join-Path $repo "tools\run_position_trial_halfstep.py"
+$workerScript = Join-Path $repo "tools\run_position_trial.py"
 $py = Join-Path $env:USERPROFILE ".platformio\penv\Scripts\python.exe"
 
 if (-not (Test-Path $sourceScript)) {
     throw "JMP script not found: $sourceScript"
 }
-
 if (-not (Test-Path $workerScript)) {
-    throw "Half-step trial worker not found: $workerScript"
+    throw "Physical trial worker not found: $workerScript"
 }
-
 if (-not (Test-Path $py)) {
     $command = Get-Command python -ErrorAction SilentlyContinue
     if (-not $command) { throw "Python not found." }
     $py = $command.Source
 }
 
-# JMP's flat-session save path must exist before the JSL runs.
-$sessionDir = Join-Path $repo "data\position_autotune_directpid_v40_300deg10xrange_3s_halfstep\sessions"
+$studyName = "PositionStudy_DirectPID_v41_300Deg_MainRebuild"
+$sessionDir = Join-Path $repo "data\position_autotune_directpid_v41_mainrebuild\sessions"
 New-Item -ItemType Directory -Force $sessionDir | Out-Null
 
-# Build a runtime copy so collaborators do not need to edit machine-specific
-# paths or serial ports in the tracked JSL. The tracked JSL remains a readable
-# template; this launcher adds the current 0.5-step experimental policy.
+# Create a machine-specific runtime copy. Physical-control logic remains in the
+# tracked Python worker; this copy only injects paths/port and snaps JMP's table
+# values to the 0.5 PID grid so the recorded factors equal what the motor runs.
 $runtimeScript = Join-Path $env:TEMP "DiscoveryPID_Position_V2_runtime.jsl"
 $text = Get-Content $sourceScript -Raw
 $repoJsl = ($repo -replace '\\', '/') + '/'
@@ -60,19 +58,16 @@ $text = [regex]::Replace(
     1
 )
 
-# Give half-step sessions their own study/data identity.
 $text = $text.Replace(
     'studyName = "PositionStudy_DirectPID_v39_300Deg10xRange_3s";',
-    'studyName = "PositionStudy_DirectPID_v40_300Deg10xRange_3s_HalfStep";'
+    "studyName = `"$studyName`";"
 )
 $text = $text.Replace(
     'data/position_autotune_directpid_v39_300deg10xrange_3s',
-    'data/position_autotune_directpid_v40_300deg10xrange_3s_halfstep'
+    'data/position_autotune_directpid_v41_mainrebuild'
 )
 
-# Quantize every seed and Bayesian proposal to the nearest 0.5 before the
-# physical worker is called. The Bayesian row is overwritten with those exact
-# tested values so JMP learns from the controller settings that actually ran.
+# Quantize both initial seeds and Bayesian proposals to the nearest 0.5.
 $text = $text.Replace(
     '        seedKp = seedSettings[seedIndex][1];',
     '        seedKp = Round( seedSettings[seedIndex][1] * 2 ) / 2;'
@@ -85,7 +80,6 @@ $text = $text.Replace(
     '        seedKd = seedSettings[seedIndex][3];',
     '        seedKd = Round( seedSettings[seedIndex][3] * 2 ) / 2;'
 )
-
 $text = $text.Replace(
     '        proposedKp = Column( dt, "KP" )[newRow];',
     '        proposedKp = Round( Column( dt, "KP" )[newRow] * 2 ) / 2;'
@@ -99,23 +93,20 @@ $text = $text.Replace(
 @'
         proposedKd = Round( Column( dt, "KD" )[newRow] * 2 ) / 2;
 
-        // Record the exact half-step gains used by the physical controller.
+        // Store the exact gains that are physically tested.
         Column( dt, "KP" )[newRow] = proposedKp;
         Column( dt, "KI" )[newRow] = proposedKi;
         Column( dt, "KD" )[newRow] = proposedKd;
 '@
 )
 
-# Show the quantization policy on the arm/start dialog.
 $text = $text.Replace(
     '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\!N" ||',
     '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\!N" || "PID coefficient increment: 0.5\!N" ||'
 )
 
-# A transient serial/configuration failure should invalidate one run, not kill
-# the entire Bayesian study. The worker already writes a finite CONTROL_ERROR_
-# result row. Remove the template's special hard-stop block so that row falls
-# through to the normal trial-warning path and the next run can proceed.
+# A failed physical run is an invalid penalty row, not a reason to kill the
+# entire optimization. The Python worker prints the concrete control error.
 $text = [regex]::Replace(
     $text,
     '(?s)\s*If\(\s*Contains\( statusText, "CONTROL_ERROR_" \) == 1,.*?Throw\( statusText \);\s*\);\s*(?=\s*If\(\s*Is Missing\( scoreValue \))',
@@ -123,9 +114,23 @@ $text = [regex]::Replace(
     1
 )
 
-# Normalize the quote helper in case a JSL copy was produced through a JSON
-# transport that escaped its embedded quote one extra time.
+# Normalize quote helper for JMP on Windows.
 $text = $text.Replace('    "\!\"" || Char( value ) || "\!\""', '    "\!"" || Char( value ) || "\!""')
+
+# Refuse to launch a partially patched runtime script. This keeps JMP from
+# silently optimizing without the physical worker connected.
+if ($text -notmatch [regex]::Escape($workerJsl)) {
+    throw "Runtime JSL validation failed: physical worker path was not injected."
+}
+if ($text -notmatch 'proposedKp\s*=\s*Round\(') {
+    throw "Runtime JSL validation failed: 0.5-step Bayesian quantization missing."
+}
+if ($text -match 'Throw\( statusText \)') {
+    throw "Runtime JSL validation failed: physical CONTROL_ERROR hard-stop still present."
+}
+if ($text -notmatch [regex]::Escape($studyName)) {
+    throw "Runtime JSL validation failed: current study identity missing."
+}
 
 [System.IO.File]::WriteAllText(
     $runtimeScript,
@@ -133,10 +138,13 @@ $text = $text.Replace('    "\!\"" || Char( value ) || "\!\""', '    "\!"" || Cha
     (New-Object System.Text.UTF8Encoding($false))
 )
 
-Write-Host "Launching JMP runtime study" -ForegroundColor Cyan
-Write-Host "  Port: $Port"
-Write-Host "  PID step: 0.5"
-Write-Host "  Serial ACK retries: 3"
-Write-Host "  Control errors: warn + continue"
-Write-Host "  Runtime JSL: $runtimeScript"
+Write-Host "Launching DiscoveryPID JMP physical study" -ForegroundColor Cyan
+Write-Host "  Code branch : main"
+Write-Host "  Port        : $Port"
+Write-Host "  Worker      : $workerScript"
+Write-Host "  PID step    : 0.5"
+Write-Host "  Displacement: 300 deg"
+Write-Host "  Settle max  : 3.0 s"
+Write-Host "  ACK retries : 3"
+Write-Host "  Runtime JSL : $runtimeScript"
 Invoke-Item $runtimeScript
