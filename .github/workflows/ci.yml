@@ -65,6 +65,7 @@ jobs:
           assert cfg['pidRanges']['kp'] == [0.5, 1000.0]
           assert cfg['pidRanges']['ki'] == [0.0, 500.0]
           assert cfg['pidRanges']['kd'] == [0.0, 200.0]
+          assert cfg['maxSettlingTimeSeconds'] == 3.0
 
           assert 'direct-position-pid-v3.4-300deg-10xrange' in fw
           assert 'MAX_POSITION_KP = 1000.0f' in fw
@@ -76,7 +77,11 @@ jobs:
           assert 'EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.4-300deg-10xrange"' in py
           assert 'default=300.0' in py
           assert 'default=60.0' in py
-          assert 'studyName = "PositionStudy_DirectPID_v38_300Deg10xRange";' in jsl
+          assert '"--max-settling-seconds", type=float, default=3.0' in py
+          assert 'status = "TEST_SETTLING_TIMEOUT"' in py
+          assert 'studyName = "PositionStudy_DirectPID_v39_300Deg10xRange_3s";' in jsl
+          assert 'maxSettlingTimeSeconds = 3.0;' in jsl
+          assert '"--max-settling-seconds", Char( maxSettlingTimeSeconds )' in jsl
           assert 'testOffsetDeg = 300.0;' in jsl
           assert 'kpHigh = 1000.0;' in jsl
           assert 'kiHigh = 500.0;' in jsl
