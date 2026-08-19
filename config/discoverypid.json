@@ -1,10 +1,10 @@
 {
-  "profileName": "Direct PID / 300-degree Bayesian study - rebuilt main physical worker / 3 s settling max / 0.5 PID steps",
+  "profileName": "Direct PID / 300-degree Bayesian study - smooth snap-home return / 3 s settling max / 0.5 PID steps",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
-  "firmwareId": "DiscoveryPID direct-position-pid-v3.4-300deg-10xrange 2026-08-18",
+  "firmwareId": "DiscoveryPID direct-position-pid-v3.5-smooth-return 2026-08-19",
   "studyName": "PositionStudy_DirectPID_v41_300Deg_MainRebuild",
   "testOffsetDeg": 300.0,
   "pidRanges": {
@@ -14,5 +14,19 @@
   },
   "maxSettlingTimeSeconds": 3.0,
   "pidCoefficientStep": 0.5,
-  "serialAckRetries": 3
+  "serialAckRetries": 3,
+  "scoreWeights": {
+    "settlingTime": 2.0,
+    "overshoot": 1.0,
+    "oscillations": 0.5,
+    "pwmChatter": 4.0,
+    "iae": 0.01,
+    "finalError": 0.25
+  },
+  "returnSmoothing": {
+    "minimumPwmTaperStartDeg": 12.0,
+    "minimumPwmTaperEndDeg": 1.0,
+    "outputRpmFilterAlpha": 0.15,
+    "fastTelemetryHz": 20
+  }
 }
