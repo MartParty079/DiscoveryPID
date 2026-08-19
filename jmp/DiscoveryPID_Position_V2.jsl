@@ -13,7 +13,7 @@ Names Default To Here( 1 );
 // USER SETTINGS
 // ============================================================================
 
-studyName = "PositionStudy_DirectPID_v38_300Deg10xRange";
+studyName = "PositionStudy_DirectPID_v39_300Deg10xRange_3s";
 
 portName = "COM7";
 // USER CONTROLS — 300-degree displacement, wide direct-PID search.
@@ -26,6 +26,10 @@ useBestCompletedPIDForSetup = 1;
 // HOME TARGET PADDING IN ENCODER PULSES/COUNTS.
 // 2 means -2,-1,0,+1,+2 all count as home.
 homePaddingPulses = 2;
+
+// Maximum allowed release-to-home settling time.
+// Timer starts at EVENT TEST_RETURN and stops on first entry into homePaddingPulses.
+maxSettlingTimeSeconds = 3.0;
 
 // MINIMUM NONZERO MOTOR PWM.
 // 0 disables it. Raise this until the motor breaks static friction consistently.
@@ -66,7 +70,7 @@ workerScript =
 // Every launch still gets unique timestamped filenames, but JMP no longer
 // creates a dynamic nested directory before Save Text File().
 dataRoot =
-    projectDirectory || "data/position_autotune_directpid_v38_300deg10xrange";
+    projectDirectory || "data/position_autotune_directpid_v39_300deg10xrange_3s";
 
 sessionRoot =
     dataRoot || "/sessions";
@@ -232,6 +236,7 @@ confirmStudyStart = Function( {},
                 "Displacement setup controller: best completed PID so far\!N" ||
                 "Direct PID PWM ceiling: " || Char( returnMaxPWM ) || "\!N" ||
                 "Home target padding: +/-" || Char( Round( homePaddingPulses ) ) || " encoder pulses\!N" ||
+                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\!N" ||
                 "Minimum drive PWM: " || Char( minimumDrivePWM ) || "\!N" ||
 
                 "Maximum total runs: " ||
@@ -781,6 +786,7 @@ Function(
             "--test-offset", Char( testOffsetDeg ),
             "--return-max-pwm", Char( returnMaxPWM ),
             "--home-padding-pulses", Char( Round( homePaddingPulses ) ),
+            "--max-settling-seconds", Char( maxSettlingTimeSeconds ),
             "--minimum-drive-pwm", Char( minimumDrivePWM ),
 
             "--setup-kp", Char( setupKpValue ),
@@ -934,6 +940,16 @@ Function(
             V List Box(
                 Text Box(
                     If(
+                        resultList[10] == "TEST_SETTLING_TIMEOUT",
+
+                        "ERROR: SETTLING TIME EXCEEDED " ||
+                        Char( maxSettlingTimeSeconds ) ||
+                        " SECONDS.\!N\!N" ||
+                        "The candidate did not enter +/-" ||
+                        Char( Round( homePaddingPulses ) ) ||
+                        " encoder counts of home before the settling deadline.\!N" ||
+                        "This run is saved as an invalid penalty row and JMP will continue to the next trial.",
+
                         resultList[10] == "TEST_PREP_TIMEOUT",
 
                         "WARNING: RETURN TIMER NEVER STARTED.\!N\!N" ||

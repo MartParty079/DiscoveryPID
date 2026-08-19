@@ -12,6 +12,7 @@ The repository default branch, `main`, is the current supported **Direct PID / 3
 - Kp search: **0.5 to 1000**
 - Ki search: **0 to 500**
 - Kd search: **0 to 200**
+- maximum scored settling time: **3.0 s**
 
 The scored return controller is a single standard position PID that outputs PWM directly:
 
@@ -84,6 +85,8 @@ EVENT TEST_RETURN       <- timer starts
 candidate PID returns
 enter +/-2 encoder counts of home
                          <- timer stops
+3.0 s without entering home window
+                         <- trial errors, gets a penalty, then study continues
 ```
 
 If a trial does not produce a valid return measurement, JMP shows a warning, saves a finite penalty row, and continues. Invalid rows cannot become the best setup PID.
@@ -94,7 +97,8 @@ If a trial does not produce a valid return measurement, JMP shows a warning, sav
 - minimum nonzero drive PWM: **60**
 - home window: **+/-2 encoder counts**
 - prep timeout: **45 s**
-- return timeout: **45 s**
+- maximum scored settling time: **3.0 s**
+- firmware return/recovery timeout: **45 s**
 - Python overall timeout: **60 s**
 
 The initial displacement uses the best valid completed PID from the current JMP session. Run 1 falls back to its current candidate PID.
