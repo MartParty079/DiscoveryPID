@@ -58,6 +58,7 @@ jobs:
           py = Path('tools/run_position_trial.py').read_text()
           jsl = Path('jmp/DiscoveryPID_Position_V2.jsl').read_text()
           launcher = Path('scripts/position_v2/open_jmp.ps1').read_text()
+          terminal = Path('DiscoveryPID.ps1').read_text()
           cfg = json.loads(Path('config/discoverypid.json').read_text())
 
           assert cfg['latestBranch'] == 'main'
@@ -105,6 +106,19 @@ jobs:
           assert 'ACK retries : 3' in launcher
           assert 'Runtime JSL validation failed' in launcher
           assert 'proposedKp = Round(' in launcher
+
+          # User-facing terminal stays intentionally simple.
+          assert '[ValidateSet("menu", "home", "test", "jmp", "manual", "help")]' in terminal
+          assert 'function Start-Home' in terminal
+          assert 'function Start-Test' in terminal
+          assert 'function Start-Jmp' in terminal
+          assert 'function Start-Manual' in terminal
+          assert 'Read-PidValue "Kp" 0.5 1000.0' in terminal
+          assert 'Read-PidValue "Ki" 0.0 500.0' in terminal
+          assert 'Read-PidValue "Kd" 0.0 200.0' in terminal
+          assert '--setup-kp $kp' in terminal
+          assert '--setup-ki $ki' in terminal
+          assert '--setup-kd $kd' in terminal
           PY
 
       - name: Build Mega firmware
