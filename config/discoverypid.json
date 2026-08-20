@@ -9,6 +9,11 @@
   "dataRoot": "position_autotune_directpid_v51_three_response",
   "testOffsetDeg": 300.0,
   "minimumDrivePWM": 0.0,
+  "defaultPID": {
+    "kp": 1.35,
+    "ki": 0.4,
+    "kd": 0.1
+  },
   "pidRanges": {
     "kp": [0.0, 50.0],
     "ki": [0.0, 20.0],
@@ -65,7 +70,7 @@
     "abnormalPenalty": 500.0
   },
   "seedSettings": [
-    [20.0, 5.0, 4.0],
+    [1.35, 0.4, 0.1],
     [21.0, 6.0, 3.0],
     [22.0, 7.0, 2.0],
     [23.0, 6.5, 2.0],
