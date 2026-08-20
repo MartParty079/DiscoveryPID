@@ -1,14 +1,15 @@
 {
-  "profileName": "Direct PID / 300-degree multi-response Bayesian study - fast smooth stop / 3s hard cutoff",
+  "profileName": "Direct PID / 300-degree multi-response Bayesian study - visible live table / censored 3s timeout",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
   "firmwareId": "DiscoveryPID direct-position-pid-v3.5-smooth-return 2026-08-19",
-  "studyName": "PositionStudy_DirectPID_v44_MultiResponseFastSmooth_300Deg",
+  "studyName": "PositionStudy_DirectPID_v45_MultiResponseVisible_300Deg",
+  "dataRoot": "position_autotune_directpid_v45_multiresponse_visible",
   "testOffsetDeg": 300.0,
   "pidRanges": {
-    "kp": [0.5, 200.0],
+    "kp": [0.5, 30.0],
     "ki": [0.0, 100.0],
     "kd": [0.0, 50.0]
   },
@@ -90,12 +91,12 @@
     [6.0, 0.0, 1.0],
     [8.0, 0.0, 1.5],
     [10.0, 0.0, 2.0],
-    [15.0, 0.5, 2.5],
-    [25.0, 1.0, 4.0],
-    [40.0, 2.0, 6.0],
-    [70.0, 4.0, 10.0],
-    [120.0, 8.0, 18.0],
-    [200.0, 15.0, 30.0]
+    [12.0, 0.5, 2.5],
+    [15.0, 1.0, 3.0],
+    [18.0, 2.0, 4.0],
+    [22.0, 4.0, 6.0],
+    [26.0, 8.0, 9.0],
+    [30.0, 15.0, 14.0]
   ],
   "dataPolicy": {
     "returnDeadlineSeconds": 3.0,
@@ -104,7 +105,10 @@
     "recoveryMotionIncludedInScoring": false,
     "newSessionPerLaunch": true,
     "returnFailureResponse": "0 for COMPLETE; 1 for timeout/error",
-    "undefinedPhysicalResponsesRemainMissing": true
+    "timeoutSettlingResponseSeconds": 3.0,
+    "missingHomeEntryRpmResponse": 10.0,
+    "multiResponseRowsRemainNumeric": true,
+    "liveJmpTableVisible": true
   },
   "returnSmoothing": {
     "minimumPwmTaperStartDeg": 12.0,
