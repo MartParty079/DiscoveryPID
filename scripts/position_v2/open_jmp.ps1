@@ -20,14 +20,14 @@ if (-not (Test-Path $py)) {
     $py = $command.Source
 }
 
-$studyName = "PositionStudy_DirectPID_v42_FastSmooth_300Deg"
-$sessionDir = Join-Path $repo "data\position_autotune_directpid_v42_fastsmooth\sessions"
+$studyName = "PositionStudy_DirectPID_v43_CleanFastSmooth_300Deg"
+$sessionDir = Join-Path $repo "data\position_autotune_directpid_v43_clean_fastsmooth\sessions"
 New-Item -ItemType Directory -Force $sessionDir | Out-Null
 
 # Create a machine-specific runtime copy. Physical-control logic remains in the
-# tracked Python worker; this copy only injects paths/port, the current seed
-# design, and snaps JMP's table values to the 0.5 PID grid so the recorded
-# factors equal what the motor actually runs.
+# tracked Python worker; this copy only injects paths/port, the current ranges
+# and seed design, and snaps JMP's table values to the 0.5 PID grid so the
+# recorded factors equal what the motor actually runs.
 $runtimeScript = Join-Path $env:TEMP "DiscoveryPID_Position_V2_runtime.jsl"
 $text = Get-Content $sourceScript -Raw
 $repoJsl = ($repo -replace '\\', '/') + '/'
@@ -65,25 +65,29 @@ $text = $text.Replace(
 )
 $text = $text.Replace(
     'data/position_autotune_directpid_v39_300deg10xrange_3s',
-    'data/position_autotune_directpid_v42_fastsmooth'
+    'data/position_autotune_directpid_v43_clean_fastsmooth'
 )
 
-# Progressive seed design. The first points are intentionally conservative and
-# should establish usable physical responses. The later points progressively
-# increase authority and are allowed to be aggressive so Bayesian optimization
-# sees the transition from slow/stable to fast/potentially underdamped.
+# Tight search region. These are the only ranges presented to JMP.
+$text = $text.Replace('kpHigh = 1000.0;', 'kpHigh = 200.0;')
+$text = $text.Replace('kiHigh = 500.0;', 'kiHigh = 100.0;')
+$text = $text.Replace('kdHigh = 200.0;', 'kdHigh = 50.0;')
+
+# Progressive seed design. Early seeds are conservative but should still move
+# the 300-degree return. Later seeds progressively increase authority and are
+# intentionally allowed to approach underdamped/aggressive behavior.
 $seedBlock = @'
 seedSettings = {
-    {0.5,    0.0,  0.5},
-    {1.0,    0.0,  0.5},
-    {2.0,    0.0,  0.5},
-    {5.0,    0.0,  1.0},
-    {10.0,   0.0,  1.0},
-    {20.0,   0.5,  2.0},
-    {40.0,   1.0,  3.0},
-    {80.0,   2.0,  5.0},
-    {160.0,  4.0,  8.0},
-    {320.0,  8.0, 12.0}
+    {4.0,    0.0,  1.0},
+    {6.0,    0.0,  1.0},
+    {8.0,    0.0,  1.5},
+    {10.0,   0.0,  2.0},
+    {15.0,   0.5,  2.5},
+    {25.0,   1.0,  4.0},
+    {40.0,   2.0,  6.0},
+    {70.0,   4.0, 10.0},
+    {120.0,  8.0, 18.0},
+    {200.0, 15.0, 30.0}
 };
 '@
 $text = [regex]::Replace(
@@ -128,7 +132,7 @@ $text = $text.Replace(
 
 $text = $text.Replace(
     '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\!N" ||',
-    '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\!N" || "Target response: under 1.0 s with a smooth home entry\!N" || "PID coefficient increment: 0.5\!N" ||'
+    '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s HARD CUTOFF\!N" || "Target response: under 1.0 s with a smooth home entry\!N" || "PID ranges: Kp 0.5-200, Ki 0-100, Kd 0-50\!N" || "PID coefficient increment: 0.5\!N" ||'
 )
 
 # A failed physical run is an invalid penalty row, not a reason to kill the
@@ -143,8 +147,8 @@ $text = [regex]::Replace(
 # Normalize quote helper for JMP on Windows.
 $text = $text.Replace('    "\!\"" || Char( value ) || "\!\""', '    "\!"" || Char( value ) || "\!""')
 
-# Refuse to launch a partially patched runtime script. This keeps JMP from
-# silently optimizing without the physical worker connected or with stale seeds.
+# Refuse to launch a partially patched runtime study. This catches stale study
+# identity, ranges, seed design, or loss of the common 3-second worker cutoff.
 if ($text -notmatch [regex]::Escape($workerJsl)) {
     throw "Runtime JSL validation failed: physical worker path was not injected."
 }
@@ -157,8 +161,18 @@ if ($text -match 'Throw\( statusText \)') {
 if ($text -notmatch [regex]::Escape($studyName)) {
     throw "Runtime JSL validation failed: current study identity missing."
 }
-if ($text -notmatch '\{0\.5,\s+0\.0,\s+0\.5\}' -or $text -notmatch '\{320\.0,\s+8\.0,\s+12\.0\}') {
-    throw "Runtime JSL validation failed: fast/smooth progressive seed design missing."
+if ($text -notmatch 'kpHigh\s*=\s*200\.0;' -or
+    $text -notmatch 'kiHigh\s*=\s*100\.0;' -or
+    $text -notmatch 'kdHigh\s*=\s*50\.0;') {
+    throw "Runtime JSL validation failed: PID ranges are not 200/100/50."
+}
+if ($text -notmatch 'maxSettlingTimeSeconds\s*=\s*3\.0;' -or
+    $text -notmatch '"--max-settling-seconds", Char\( maxSettlingTimeSeconds \)') {
+    throw "Runtime JSL validation failed: common 3-second return cutoff missing."
+}
+if ($text -notmatch '\{4\.0,\s+0\.0,\s+1\.0\}' -or
+    $text -notmatch '\{200\.0,\s+15\.0,\s+30\.0\}') {
+    throw "Runtime JSL validation failed: clean progressive seed design missing."
 }
 
 [System.IO.File]::WriteAllText(
@@ -172,10 +186,11 @@ Write-Host "  Code branch : main"
 Write-Host "  Port        : $Port"
 Write-Host "  Worker      : $workerScript"
 Write-Host "  Study       : $studyName"
+Write-Host "  PID range   : Kp 0.5-200 | Ki 0-100 | Kd 0-50"
 Write-Host "  PID step    : 0.5"
 Write-Host "  Displacement: 300 deg"
 Write-Host "  Target      : <1.0 s, smooth stop"
-Write-Host "  Settle max  : 3.0 s"
+Write-Host "  Settle max  : 3.0 s HARD CUTOFF (seeds + Bayesian)"
 Write-Host "  ACK retries : 3"
 Write-Host "  Runtime JSL : $runtimeScript"
 Invoke-Item $runtimeScript
