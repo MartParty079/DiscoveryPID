@@ -171,7 +171,7 @@ function Start-Manual {
         --kd $kd `
         --test-offset 300 `
         --return-max-pwm 225 `
-        --home-padding-pulses 2 `
+        --home-padding-pulses 8 `
         --max-settling-seconds 3 `
         --minimum-drive-pwm $minimumDrivePWM `
         --setup-kp $kp `
