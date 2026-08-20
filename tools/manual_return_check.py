@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--kd", required=True, type=float)
     p.add_argument("--minimum-drive-pwm", type=float, default=0.0)
     p.add_argument("--return-max-pwm", type=float, default=225.0)
-    p.add_argument("--settle-timeout", type=float, default=15.0)
+    p.add_argument("--settle-timeout", type=float, default=5.0)
     return p.parse_args()
 
 
@@ -90,6 +90,7 @@ def main() -> int:
         "Requested PID (NO host rounding): "
         f"Kp={exact_number(a.kp)} Ki={exact_number(a.ki)} Kd={exact_number(a.kd)}"
     )
+    print(f"Hard return cutoff: {a.settle_timeout:g} s")
     print("Start with the mechanism physically at its intended HOME position.")
     print()
 
@@ -168,19 +169,28 @@ def main() -> int:
 
             elapsed = time.monotonic() - start
             command_wait(ser, "TELEM=1", "ACK TELEM=1", echo=False)
-            final_status = status(ser, echo=True)
 
-            print()
             if settled:
+                final_status = status(ser, echo=True)
+                print()
                 print(f"HOME settled latch reached in approximately {elapsed:.3f} s.")
                 print("Controller remains in HOLD at home.")
                 return 0
 
+            # A timed-out TEST is over: stop applying PID output rather than
+            # allowing an unsuccessful controller to keep driving indefinitely.
+            try:
+                command_wait(ser, "STOP", "ACK STOP", echo=False)
+            except RuntimeError:
+                write_command(ser, "STOP")
+            final_status = status(ser, echo=True)
+
+            print()
             print(
-                f"WARNING: HOME settled latch was not reached within {a.settle_timeout:.1f} s.",
+                f"TIMEOUT: HOME settled latch was not reached within {a.settle_timeout:.1f} s.",
                 file=sys.stderr,
             )
-            print("Controller remains in HOLD so you can observe the response.")
+            print("Run ended; motor commanded to STOP/coast.")
             return 3
 
     except KeyboardInterrupt:
