@@ -79,6 +79,13 @@ def main() -> int:
     bo_config = config["bayesianOptimization"]
     minimum_rsquare = float(bo_config["minimumRSquare"])
     responses = bo_config["responses"]
+    response_names = [str(response["name"]) for response in responses]
+    if response_names != ["Settling Time (s)", "Overshoot (deg)", "Oscillations"]:
+        raise RuntimeError(
+            "Current JMP study requires exactly these responses in order: "
+            "Settling Time (s), Overshoot (deg), Oscillations"
+        )
+    response_label = ", ".join(response_names)
     transforms = config["dataPolicy"]["responseTransforms"]
     chatter_cap = float(transforms["pwmChatter"]["cap"])
     overshoot_cap = float(transforms["overshootDeg"]["cap"])
@@ -145,7 +152,7 @@ def main() -> int:
         "seed design",
     )
 
-    # Add bounded Bayesian responses plus raw diagnostics to the live table.
+    # Add modeled responses plus extra raw diagnostics to the live table.
     old_columns = '''        New Column(
             "Oscillations",
             Numeric,
@@ -223,10 +230,9 @@ def main() -> int:
             {{Goal( Minimize ), Importance( 1 ), Show Limits( 0 )}}
         );
 
-    // MULTI-RESPONSE BAYESOPT DESIRABILITY.
-    // v48 deliberately bounds every modeled response so a single violent or
-    // failed trial cannot dominate a Gaussian process. Raw chatter/overshoot
-    // remain available as diagnostics and in the per-run worker CSV.
+    // THREE-RESPONSE BAYESOPT DESIRABILITY.
+    // JMP models and plots only settling time, overshoot, and oscillations.
+    // Other measured quantities stay in the table as diagnostics only.
 {response_blocks}
 
     dt;
@@ -286,9 +292,8 @@ def main() -> int:
     Column( dt, "Status" )[rowIndex] = resultList[12];
 
     saveSnapshot( dt );'''
-    new_save = f'''    // Preserve raw diagnostics, but feed bounded/conditioned responses to
-    // Bayesian Optimization. This prevents the 280-deg overshoot and 1000+
-    // chatter outliers seen in v47 from overwhelming their GP models.
+    new_save = f'''    // Preserve raw diagnostics, while the configured JMP Y list decides
+    // which columns are actually modeled by Bayesian Optimization.
     Column( dt, "Raw Overshoot (deg)" )[rowIndex] = resultList[4];
     Column( dt, "Overshoot (deg)" )[rowIndex] =
         Min( {overshoot_cap:g}, Max( 0.0, resultList[4] ) );
@@ -307,23 +312,18 @@ def main() -> int:
     Column( dt, "Return Failure" )[rowIndex] = If( resultList[12] == "COMPLETE", 0, 1 );
 
     saveSnapshot( dt );
-    // Keep the live optimization table visible between every physical run.
     dt << Bring Window To Front;'''
-    text = replace_required(text, old_save, new_save, "save conditioned multi-response metrics")
+    text = replace_required(text, old_save, new_save, "save conditioned metrics")
 
-    multi_y = '''                Y(
-                    :Name( "Return Failure" ),
-                    :Name( "Settling Time (s)" ),
-                    :Name( "PWM Chatter" ),
-                    :Name( "Home Entry RPM" ),
-                    :Name( "Overshoot (deg)" ),
-                    :Oscillations
-                ),'''
-    text = replace_required(text, '                Y( :Score ),', multi_y, "multi-response BayesOpt Y")
+    y_lines = []
+    for index, name in enumerate(response_names):
+        comma = "," if index < len(response_names) - 1 else ""
+        y_lines.append(f'                    :Name( "{name}" ){comma}')
+    multi_y = "                Y(\n" + "\n".join(y_lines) + "\n                ),"
+    text = replace_required(text, '                Y( :Score ),', multi_y, "configured BayesOpt Y")
 
     # Let JMP exploit moderately predictive models instead of forcing most
-    # post-seed runs into MaxPro space filling. v47 used 0.50 and almost every
-    # response except Return Failure fell below that threshold.
+    # post-seed runs into MaxPro space filling.
     text = replace_required(
         text,
         '                    Minimum RSquare( 0.50 )',
@@ -342,42 +342,12 @@ def main() -> int:
         Column( dt, "KI" )[newRow] = proposedKi;
         Column( dt, "KD" )[newRow] = proposedKd;'''
 
-    text = replace_required(
-        text,
-        '        seedKp = seedSettings[seedIndex][1];',
-        seed_kp_quant,
-        "seed Kp quantization",
-    )
-    text = replace_required(
-        text,
-        '        seedKi = seedSettings[seedIndex][2];',
-        seed_ki_quant,
-        "seed Ki quantization",
-    )
-    text = replace_required(
-        text,
-        '        seedKd = seedSettings[seedIndex][3];',
-        seed_kd_quant,
-        "seed Kd quantization",
-    )
-    text = replace_required(
-        text,
-        '        proposedKp = Column( dt, "KP" )[newRow];',
-        proposed_kp_quant,
-        "Bayesian Kp quantization",
-    )
-    text = replace_required(
-        text,
-        '        proposedKi = Column( dt, "KI" )[newRow];',
-        proposed_ki_quant,
-        "Bayesian Ki quantization",
-    )
-    text = replace_required(
-        text,
-        '        proposedKd = Column( dt, "KD" )[newRow];',
-        proposed_kd_quant,
-        "Bayesian Kd quantization",
-    )
+    text = replace_required(text, '        seedKp = seedSettings[seedIndex][1];', seed_kp_quant, "seed Kp quantization")
+    text = replace_required(text, '        seedKi = seedSettings[seedIndex][2];', seed_ki_quant, "seed Ki quantization")
+    text = replace_required(text, '        seedKd = seedSettings[seedIndex][3];', seed_kd_quant, "seed Kd quantization")
+    text = replace_required(text, '        proposedKp = Column( dt, "KP" )[newRow];', proposed_kp_quant, "Bayesian Kp quantization")
+    text = replace_required(text, '        proposedKi = Column( dt, "KI" )[newRow];', proposed_ki_quant, "Bayesian Ki quantization")
+    text = replace_required(text, '        proposedKd = Column( dt, "KD" )[newRow];', proposed_kd_quant, "Bayesian Kd quantization")
 
     # Failed physical trials remain finite training rows and never abort the study.
     text = regex_required(
@@ -387,21 +357,20 @@ def main() -> int:
         "CONTROL_ERROR continuation",
     )
 
-    # Startup window explicitly states the active multi-response design.
+    # Startup window states the exact three responses that JMP will model/plot.
     text = replace_required(
         text,
         '                "Study: " ||\n                studyName ||\n                "\\!NSession: " || sessionName ||\n                "\\!N\\!N" ||',
-        '                "Study: " ||\n                studyName ||\n                "\\!NSession: " || sessionName ||\n                "\\!NBayesOpt mode: MULTI-RESPONSE DESIRABILITY\\!N" ||\n                "Responses: failure, settling, bounded chatter, home-entry RPM, bounded overshoot, oscillations\\!N" ||\n                "v48 response shaping: bounded/log-compressed for GP stability\\!N\\!N" ||',
-        "startup multi-response banner",
+        '                "Study: " ||\n                studyName ||\n                "\\!NSession: " || sessionName ||\n                "\\!NBayesOpt mode: THREE-RESPONSE DESIRABILITY\\!N" ||\n                "Responses: Settling Time (s), Overshoot (deg), Oscillations\\!N" ||\n                "Objective: minimize settling time while strongly rejecting overshoot and oscillation\\!N" ||\n                "JMP models/profilers plot only these three responses\\!N\\!N" ||',
+        "startup response banner",
     )
     text = replace_required(
         text,
         '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\\!N" ||',
-        f'                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s HARD CUTOFF\\!N" ||\n                "Timeout settling response: {max_settle:.1f} s (censored), Return Failure=1\\!N" ||\n                "BayesOpt model gate: minimum R-square {minimum_rsquare:.2f}\\!N" ||\n                "PID coefficient rounding: nearest {pid_step_jsl}\\!N" ||',
+        f'                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s HARD CUTOFF\\!N" ||\n                "Failed trials are forced to worst modeled responses\\!N" ||\n                "BayesOpt model gate: minimum R-square {minimum_rsquare:.2f}\\!N" ||\n                "PID coefficient rounding: nearest {pid_step_jsl}\\!N" ||',
         "startup timeout/model description",
     )
 
-    # Keep the data table present from the moment the session starts.
     text = replace_required(
         text,
         'Current Data Table( dt );\nsaveSnapshot( dt );',
@@ -409,10 +378,9 @@ def main() -> int:
         "initial live table",
     )
 
-    # Normalize the quote helper for Windows JMP.
     text = text.replace('    "\\!\\\"" || Char( value ) || "\\!\\\""', '    "\\!\"" || Char( value ) || "\\!\""')
 
-    # Final runtime validation before anything physical is launched.
+    response_refs = [f':Name( "{name}" )' for name in response_names]
     required = [
         study_name,
         f"kpLow = {kp_low:.1f};",
@@ -422,14 +390,9 @@ def main() -> int:
         f"kdLow = {kd_low:.1f};",
         f"kdHigh = {kd_high:.1f};",
         f"Minimum RSquare( {minimum_rsquare:.2f} )",
-        "MULTI-RESPONSE BAYESOPT DESIRABILITY",
-        "v48 response shaping: bounded/log-compressed for GP stability",
-        ':Name( "Return Failure" )',
-        ':Name( "Settling Time (s)" )',
-        ':Name( "PWM Chatter" )',
-        ':Name( "Home Entry RPM" )',
-        ':Name( "Overshoot (deg)" )',
-        ':Oscillations',
+        "THREE-RESPONSE BAYESOPT DESIRABILITY",
+        "JMP models/profilers plot only these three responses",
+        *response_refs,
         'Column( dt, "Raw PWM Chatter" )[rowIndex]',
         'Column( dt, "Raw Overshoot (deg)" )[rowIndex]',
         f'Min( {chatter_cap:g}, Log( 1 + Max( 0.0, resultList[6] ) ) )',
@@ -447,18 +410,22 @@ def main() -> int:
         raise RuntimeError(f"Runtime JSL validation failed; missing: {missing}")
     if 'Y( :Score )' in text:
         raise RuntimeError("Runtime JSL validation failed: scalar Score is still BayesOpt Y")
+    if multi_y not in text:
+        raise RuntimeError("Runtime JSL validation failed: configured three-response Y block missing")
 
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(text, encoding="utf-8", newline="\n")
     print(f"Built validated runtime JSL: {a.output}")
-    print("BayesOpt: MULTI-RESPONSE desirability with bounded/log-compressed responses")
-    print("Responses: Return Failure, Settling Time, PWM Chatter, Home Entry RPM, Overshoot, Oscillations")
+    print("BayesOpt: THREE-RESPONSE desirability")
+    print(f"Responses: {response_label}")
+    print("Objective: lowest settling time with essentially zero overshoot and zero oscillations")
+    print("JMP model/profiler output is limited to these three responses")
     print(f"PID range: Kp {kp_low:g}-{kp_high:g}, Ki {ki_low:g}-{ki_high:g}, Kd {kd_low:g}-{kd_high:g}")
     print(f"PID coefficient rounding: nearest {pid_step:g}")
     print(f"Physical worker: {worker}")
     print(f"BayesOpt minimum R-square: {minimum_rsquare:.2f}")
-    print(f"Settling timeout: {max_settle:.1f} s; timeout rows export Settling Time={max_settle:.1f} and Return Failure=1")
-    print(f"Response caps: chatter={chatter_cap:g}, overshoot={overshoot_cap:g} deg, entryRPM={entry_rpm_cap:g}, oscillations={oscillation_cap:g}")
+    print(f"Settling timeout: {max_settle:.1f} s")
+    print(f"Modeled response caps: overshoot={overshoot_cap:g} deg, oscillations={oscillation_cap:g}")
     return 0
 
 
