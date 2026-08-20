@@ -18,7 +18,7 @@
 #include <string.h>
 
 const char FIRMWARE_VERSION[] =
-    "DiscoveryPID direct-position-pid-v3.7-pure-bidirectional 2026-08-20";
+    "DiscoveryPID direct-position-pid-v3.8-final-approach 2026-08-20";
 
 constexpr int EEPROM_HOME_MAGIC_ADDRESS = 0;
 constexpr uint32_t EEPROM_HOME_MAGIC = 0x44504944UL; // "DPID"
@@ -90,17 +90,20 @@ constexpr float MAX_POSITION_KD = 200.0f;
 constexpr float MAX_PWM_COMMAND = 225.0f;
 float maximumReturnPWM = 225.0f;
 
-// Full breakaway floor far from home; tapered away during final approach.
+// Full breakaway floor far from home. For TEST_RETURN it now tapers to zero
+// earlier so the last few degrees are controlled by P/I/D rather than a forced
+// minimum motor command.
 float minimumDrivePWM = 80.0f;
-constexpr float RETURN_MIN_PWM_TAPER_START_DEG = 12.0f;
-constexpr float RETURN_MIN_PWM_TAPER_END_DEG = 1.0f;
+constexpr float RETURN_MIN_PWM_TAPER_START_DEG = 8.0f;
+constexpr float RETURN_MIN_PWM_TAPER_END_DEG = 3.0f;
 
 // Encoder velocity is quantized at the 10 ms control rate. Filtering suppresses
 // one-count derivative noise while retaining useful D-term braking response.
 constexpr float OUTPUT_RPM_FILTER_ALPHA = 0.15f;
 
 constexpr float POSITION_INTEGRAL_LIMIT = 80.0f;
-constexpr float POSITION_I_ENABLE_BAND_DEG = 10.0f;
+constexpr float POSITION_I_ENABLE_BAND_DEG = 2.0f;
+constexpr float POSITION_I_MAX_PWM = 12.0f;
 constexpr float POSITION_I_BLEED_PER_SEC = 8.0f;
 float previousPositionErrorDeg = 0.0f;
 
@@ -538,8 +541,14 @@ float calculateDirectPositionPWM(
             POSITION_INTEGRAL_LIMIT
         );
 
+        const float proposedIntegralPWM = constrain(
+            ki * proposedIntegral,
+            -POSITION_I_MAX_PWM,
+            POSITION_I_MAX_PWM
+        );
+
         const float proposedPWM =
-            kp * errorDeg + ki * proposedIntegral - kd * outputPositionVelocityDegPerSec;
+            kp * errorDeg + proposedIntegralPWM - kd * outputPositionVelocityDegPerSec;
 
         const bool insideLimit =
             proposedPWM < maximumReturnPWM && proposedPWM > -maximumReturnPWM;
@@ -554,8 +563,14 @@ float calculateDirectPositionPWM(
         }
     }
 
+    const float integralPWM = constrain(
+        ki * positionIntegral,
+        -POSITION_I_MAX_PWM,
+        POSITION_I_MAX_PWM
+    );
+
     float command =
-        kp * errorDeg + ki * positionIntegral - kd * outputPositionVelocityDegPerSec;
+        kp * errorDeg + integralPWM - kd * outputPositionVelocityDegPerSec;
 
     command = constrain(command, -maximumReturnPWM, maximumReturnPWM);
 
