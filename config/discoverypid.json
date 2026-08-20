@@ -1,12 +1,12 @@
 {
-  "profileName": "Direct PID / active braking / 300-degree multi-response Bayesian study / 3s censored cutoff",
+  "profileName": "Direct pure bidirectional PID / 300-degree multi-response Bayesian study / 3s censored cutoff",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
-  "firmwareId": "DiscoveryPID direct-position-pid-v3.6-active-brake 2026-08-20",
-  "studyName": "PositionStudy_DirectPID_v46_ActiveBrakeMultiResponse_300Deg",
-  "dataRoot": "position_autotune_directpid_v46_active_brake_multiresponse",
+  "firmwareId": "DiscoveryPID direct-position-pid-v3.7-pure-bidirectional 2026-08-20",
+  "studyName": "PositionStudy_DirectPID_v47_PureBidirectionalMultiResponse_300Deg",
+  "dataRoot": "position_autotune_directpid_v47_pure_bidirectional_multiresponse",
   "testOffsetDeg": 300.0,
   "minimumDrivePWM": 80.0,
   "pidRanges": {
@@ -116,9 +116,9 @@
     "minimumPwmTaperEndDeg": 1.0,
     "outputRpmFilterAlpha": 0.15,
     "fastTelemetryHz": 20,
-    "activeBraking": true,
-    "zeroCommandHardwareBrake": true,
-    "activeBrakeReleaseRpm": 0.35,
+    "pidGeneratedBidirectionalBraking": true,
+    "zeroCommandHardwareBrake": false,
+    "zeroCommandBehavior": "coast",
     "coastBeforeReverse": false,
     "controlLoopHz": 100
   }
