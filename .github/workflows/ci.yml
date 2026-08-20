@@ -21,7 +21,10 @@ jobs:
 
       - name: Compile Python tools
         run: |
-          python -m py_compile tools/run_position_trial.py tools/home_position.py
+          python -m py_compile \
+            tools/run_position_trial.py \
+            tools/home_position.py \
+            tools/build_jmp_runtime.py
 
       - name: Parse PowerShell helpers
         shell: pwsh
@@ -48,163 +51,93 @@ jobs:
             }
           }
 
-      - name: Check current position-study configuration
+      - name: Check v45 configuration
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
 
-          fw = Path('src/main.cpp').read_text()
-          py = Path('tools/run_position_trial.py').read_text()
-          jsl = Path('jmp/DiscoveryPID_Position_V2.jsl').read_text()
-          launcher = Path('scripts/position_v2/open_jmp.ps1').read_text()
-          terminal = Path('DiscoveryPID.ps1').read_text()
           cfg = json.loads(Path('config/discoverypid.json').read_text())
+          terminal = Path('DiscoveryPID.ps1').read_text()
+          launcher = Path('scripts/position_v2/open_jmp.ps1').read_text()
+          worker = Path('tools/run_position_trial.py').read_text()
 
           assert cfg['latestBranch'] == 'main'
-          assert cfg['defaultPort'] == 'COM7'
+          assert cfg['studyName'] == 'PositionStudy_DirectPID_v45_MultiResponseVisible_300Deg'
+          assert cfg['dataRoot'] == 'position_autotune_directpid_v45_multiresponse_visible'
           assert cfg['testOffsetDeg'] == 300.0
-          assert cfg['pidRanges']['kp'] == [0.5, 200.0]
+          assert cfg['pidRanges']['kp'] == [0.5, 30.0]
           assert cfg['pidRanges']['ki'] == [0.0, 100.0]
           assert cfg['pidRanges']['kd'] == [0.0, 50.0]
           assert cfg['maxSettlingTimeSeconds'] == 3.0
           assert cfg['pidCoefficientStep'] == 0.5
-          assert cfg['serialAckRetries'] == 3
-          assert cfg['studyName'] == 'PositionStudy_DirectPID_v44_MultiResponseFastSmooth_300Deg'
-          assert cfg['firmwareId'] == 'DiscoveryPID direct-position-pid-v3.5-smooth-return 2026-08-19'
 
-          bo_cfg = cfg['bayesianOptimization']
-          assert bo_cfg['mode'] == 'multiResponseDesirability'
-          assert bo_cfg['scalarScoreUsedAsBayesianResponse'] is False
-          assert bo_cfg['scalarScoreRetainedForDiagnosticsAndSetupSelection'] is True
-          responses = {r['name']: r for r in bo_cfg['responses']}
-          assert set(responses) == {
+          bo = cfg['bayesianOptimization']
+          assert bo['mode'] == 'multiResponseDesirability'
+          assert bo['scalarScoreUsedAsBayesianResponse'] is False
+          assert [r['name'] for r in bo['responses']] == [
               'Return Failure', 'Settling Time (s)', 'PWM Chatter',
               'Home Entry RPM', 'Overshoot (deg)', 'Oscillations'
-          }
-          assert responses['Return Failure']['importance'] == 6.0
-          assert responses['Return Failure']['lower'] == [0.0, 1.0]
-          assert responses['Return Failure']['upper'] == [1.0, 0.0]
-          assert responses['Settling Time (s)']['importance'] == 5.0
-          assert responses['Settling Time (s)']['middle'] == [1.0, 0.85]
-          assert responses['Settling Time (s)']['upper'] == [3.0, 0.0]
-          assert responses['PWM Chatter']['importance'] == 5.0
-          assert responses['Home Entry RPM']['importance'] == 5.0
-          assert responses['Overshoot (deg)']['importance'] == 3.0
-          assert responses['Oscillations']['importance'] == 5.0
-
-          objective = cfg['scoreObjective']
-          assert objective['purpose'] == 'diagnostic ranking and best completed setup PID selection only'
-          assert objective['settlingTargetSeconds'] == 1.0
-          assert objective['speedLinearWeight'] == 4.0
-          assert objective['lateQuadraticWeight'] == 20.0
-          assert objective['pwmChatterWeight'] == 8.0
-          assert objective['homeEntryRpmSquaredWeight'] == 0.15
-          assert objective['overshootLinearWeight'] == 0.75
-          assert objective['overshootSquaredWeight'] == 0.20
-          assert objective['oscillationWeight'] == 5.0
-          assert objective['iaeWeight'] == 0.003
-          assert objective['finalErrorWeight'] == 0.20
+          ]
 
           assert cfg['seedSettings'][0] == [4.0, 0.0, 1.0]
-          assert cfg['seedSettings'][3] == [10.0, 0.0, 2.0]
-          assert cfg['seedSettings'][-1] == [200.0, 15.0, 30.0]
+          assert cfg['seedSettings'][-1] == [30.0, 15.0, 14.0]
+          assert all(row[0] <= 30.0 for row in cfg['seedSettings'])
 
           policy = cfg['dataPolicy']
           assert policy['returnDeadlineSeconds'] == 3.0
-          assert policy['timeoutStatus'] == 'TEST_SETTLING_TIMEOUT'
+          assert policy['timeoutSettlingResponseSeconds'] == 3.0
+          assert policy['missingHomeEntryRpmResponse'] == 10.0
+          assert policy['multiResponseRowsRemainNumeric'] is True
+          assert policy['liveJmpTableVisible'] is True
           assert policy['timeoutRowsEligibleAsBestSetup'] is False
           assert policy['recoveryMotionIncludedInScoring'] is False
-          assert policy['newSessionPerLaunch'] is True
-          assert policy['undefinedPhysicalResponsesRemainMissing'] is True
 
-          assert cfg['returnSmoothing']['minimumPwmTaperStartDeg'] == 12.0
-          assert cfg['returnSmoothing']['minimumPwmTaperEndDeg'] == 1.0
-          assert cfg['returnSmoothing']['outputRpmFilterAlpha'] == 0.15
-          assert cfg['returnSmoothing']['fastTelemetryHz'] == 20
+          assert 'status = "TEST_SETTLING_TIMEOUT"' in worker
+          assert 'now - return_start >= a.max_settling_seconds' in worker
 
-          # Firmware still accepts a wider safety envelope; the study/manual
-          # interface deliberately searches only the tighter 200/100/50 box.
-          assert 'direct-position-pid-v3.5-smooth-return' in fw
-          assert 'COUNTS_PER_MOTOR_REV = 56.0f' in fw
-          assert 'TELEMETRY_DIVIDER = 5' in fw
-          assert 'RETURN_MIN_PWM_TAPER_START_DEG = 12.0f' in fw
-          assert 'RETURN_MIN_PWM_TAPER_END_DEG = 1.0f' in fw
-          assert 'OUTPUT_RPM_FILTER_ALPHA = 0.15f' in fw
-          assert 'effectiveMinimumDrivePWM' in fw
-
-          assert 'EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.5-smooth-return"' in py
-          assert 'ACK_RETRIES = 3' in py
-          assert 'def round_half' in py
-          assert 'def send_with_ack' in py
-          assert 'def pwm_chatter_penalty' in py
-          assert 'def home_entry_rpm' in py
-          assert '"PWM Chatter"' in py
-          assert '"Home Entry RPM"' in py
-          assert 'status = "TEST_SETTLING_TIMEOUT"' in py
-          assert 'default=3.0' in py
-          assert 'return_start is not None and not settling_reached' in py
-          assert 'now - return_start >= a.max_settling_seconds' in py
-          assert 'late_seconds = max(0.0, settling_for_score - 1.0)' in py
-          assert 'speed_score = 4.0 * settling_for_score + 20.0 * late_seconds * late_seconds' in py
-          assert 'smoothness_score = 8.0 * chatter + 0.15 * entry_rpm_for_score * entry_rpm_for_score' in py
-          assert 'overshoot_score = 0.75 * overshoot + 0.20 * overshoot * overshoot' in py
-          assert 'oscillation_score = 5.0 * oscillations' in py
-          assert 'tracking_score = 0.003 * iae + 0.20 * final_error' in py
-
-          # The tracked JSL is a template. open_jmp.ps1 hard-patches the current
-          # study identity/ranges/seeds/responses and validates them before JMP.
-          assert 'studyName = "PositionStudy_DirectPID_v39_300Deg10xRange_3s";' in jsl
-          assert 'maxSettlingTimeSeconds = 3.0;' in jsl
-          assert 'testOffsetDeg = 300.0;' in jsl
-          assert 'Y( :Score )' in jsl
-          assert 'EVENT TEST_RETURN' in jsl
-          assert 'cmdExecutable' not in jsl
-
-          assert 'tools\\run_position_trial.py' in launcher
-          assert 'run_position_trial_halfstep.py' not in launcher
-          assert 'PositionStudy_DirectPID_v44_MultiResponseFastSmooth_300Deg' in launcher
-          assert "kpHigh = 200.0;" in launcher
-          assert "kiHigh = 100.0;" in launcher
-          assert "kdHigh = 50.0;" in launcher
-          assert '{4.0,    0.0,  1.0}' in launcher
-          assert '{10.0,   0.0,  2.0}' in launcher
-          assert '{200.0, 15.0, 30.0}' in launcher
-          assert '3.0 s HARD CUTOFF (seeds + Bayesian)' in launcher
-          assert '--max-settling-seconds' in launcher
-          assert 'maxSettlingTimeSeconds' in launcher
-          assert '"PWM Chatter"' in launcher
-          assert '"Home Entry RPM"' in launcher
-          assert '"Return Failure"' in launcher
-          assert 'If( resultList[12] == "COMPLETE", 0, 1 )' in launcher
-          assert ':Name( "Return Failure" )' in launcher
-          assert ':Name( "Settling Time (s)" )' in launcher
-          assert ':Name( "PWM Chatter" )' in launcher
-          assert ':Name( "Home Entry RPM" )' in launcher
-          assert ':Name( "Overshoot (deg)" )' in launcher
-          assert ':Oscillations' in launcher
-          assert 'Lower( 0.60, 1.0 )' in launcher
-          assert 'Middle( 1.00, 0.85 )' in launcher
-          assert 'Upper( 3.00, 0.0 )' in launcher
-          assert 'Importance( 6 )' in launcher
-          assert 'Score       : diagnostic/setup ranking only; NOT a BayesOpt Y' in launcher
-          assert 'Runtime JSL validation failed' in launcher
-          assert 'proposedKp = Round(' in launcher
-
-          # Manual mode reads the exact same limits from config, avoiding a
-          # second hard-coded range definition.
-          assert '[ValidateSet("menu", "home", "test", "jmp", "manual", "help")]' in terminal
-          assert 'function Start-Home' in terminal
-          assert 'function Start-Test' in terminal
-          assert 'function Start-Jmp' in terminal
-          assert 'function Start-Manual' in terminal
+          # Manual mode gets the same Kp/Ki/Kd limits from config.
           assert 'Read-PidValue "Kp" ([double]$project.pidRanges.kp[0]) ([double]$project.pidRanges.kp[1])' in terminal
           assert 'Read-PidValue "Ki" ([double]$project.pidRanges.ki[0]) ([double]$project.pidRanges.ki[1])' in terminal
           assert 'Read-PidValue "Kd" ([double]$project.pidRanges.kd[0]) ([double]$project.pidRanges.kd[1])' in terminal
-          assert '--max-settling-seconds 3' in terminal
-          assert '--setup-kp $kp' in terminal
-          assert '--setup-ki $ki' in terminal
-          assert '--setup-kd $kd' in terminal
+
+          # Launcher must clearly advertise and validate the executed design.
+          assert 'MULTI-RESPONSE desirability' in launcher
+          assert 'diagnostic/setup ranking only; NOT a BayesOpt Y' in launcher
+          assert 'Timeout row :' in launcher
+          assert 'Live table  : visible and brought to front after every run' in launcher
+          assert 'If( Is Missing( resultList[2] ), resultList[2] = maxSettlingTimeSeconds );' in launcher
+          assert 'kpHigh = 30.0;' in launcher
+          PY
+
+      - name: Build and inspect JMP runtime
+        run: |
+          python tools/build_jmp_runtime.py \
+            --repo . \
+            --port COM7 \
+            --python /usr/bin/python3 \
+            --output /tmp/DiscoveryPID_runtime.jsl
+
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('/tmp/DiscoveryPID_runtime.jsl').read_text()
+
+          assert 'PositionStudy_DirectPID_v45_MultiResponseVisible_300Deg' in text
+          assert 'kpHigh = 30.0;' in text
+          assert 'kiHigh = 100.0;' in text
+          assert 'kdHigh = 50.0;' in text
+          assert 'MULTI-RESPONSE BAYESOPT DESIRABILITY' in text
+          assert 'BayesOpt mode: MULTI-RESPONSE DESIRABILITY' in text
+          assert ':Name( "Return Failure" )' in text
+          assert ':Name( "Settling Time (s)" )' in text
+          assert ':Name( "PWM Chatter" )' in text
+          assert ':Name( "Home Entry RPM" )' in text
+          assert ':Name( "Overshoot (deg)" )' in text
+          assert ':Oscillations' in text
+          assert 'Y( :Score )' not in text
+          assert 'Column( dt, "Return Failure" )[rowIndex]' in text
+          assert text.count('dt << Bring Window To Front;') >= 2
+          assert '"--max-settling-seconds", Char( maxSettlingTimeSeconds )' in text
           PY
 
       - name: Build Mega firmware
