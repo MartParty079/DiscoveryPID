@@ -14,6 +14,7 @@ foreach ($path in @($configPath, $builder, $worker, $template)) {
 }
 
 $config = Get-Content $configPath -Raw | ConvertFrom-Json
+$minimumDrivePWM = [double]$config.minimumDrivePWM
 $py = Join-Path $env:USERPROFILE ".platformio\penv\Scripts\python.exe"
 if (-not (Test-Path $py)) {
     $command = Get-Command python -ErrorAction SilentlyContinue
@@ -39,6 +40,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $text = Get-Content $runtimeScript -Raw
+
+# Runtime uses the single project PWM-floor default. The tracked JSL template
+# intentionally remains generic/historical; this is the final machine-specific
+# file JMP actually executes.
+$minimumDriveLiteral = ("minimumDrivePWM = {0:F1};" -f $minimumDrivePWM)
+if (-not $text.Contains('minimumDrivePWM = 60.0;')) {
+    throw "Runtime JSL validation failed: minimumDrivePWM template value missing."
+}
+$text = $text.Replace('minimumDrivePWM = 60.0;', $minimumDriveLiteral)
 
 # A 3-second timeout is a right-censored bad settling response, not an unknown
 # response. Keep every BayesOpt Y numeric while Return Failure explicitly marks
@@ -85,6 +95,7 @@ $required = @(
     ':Name( "Overshoot (deg)" )',
     ':Oscillations',
     'kpHigh = 30.0;',
+    $minimumDriveLiteral,
     'If( Is Missing( resultList[2] ), resultList[2] = maxSettlingTimeSeconds );',
     'dt << Bring Window To Front;'
 )
@@ -116,6 +127,8 @@ Write-Host "  Responses   : failure | settling | chatter | entry RPM | overshoot
 Write-Host "  Score       : diagnostic/setup ranking only; NOT a BayesOpt Y"
 Write-Host "  PID range   : Kp $($config.pidRanges.kp[0])-$($config.pidRanges.kp[1]) | Ki $($config.pidRanges.ki[0])-$($config.pidRanges.ki[1]) | Kd $($config.pidRanges.kd[0])-$($config.pidRanges.kd[1])"
 Write-Host "  PID step    : $($config.pidCoefficientStep)"
+Write-Host "  PWM floor   : $minimumDrivePWM (tapers near home)"
+Write-Host "  Controller  : 100 Hz PID + immediate reverse-torque active braking" -ForegroundColor Green
 Write-Host "  Displacement: $($config.testOffsetDeg) deg"
 Write-Host "  Target      : <1.0 s, smooth stop"
 Write-Host "  Settle max  : $($config.maxSettlingTimeSeconds) s HARD CUTOFF"
