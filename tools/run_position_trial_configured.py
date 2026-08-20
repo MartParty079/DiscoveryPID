@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Run a DiscoveryPID physical trial using the configured PID coefficient step.
+"""Run a DiscoveryPID physical trial using configured PID resolution and deadline.
 
 This wrapper keeps the proven physical-trial implementation in
-run_position_trial.py unchanged while replacing its legacy hard-coded 0.5 PID
-quantization with config/discoverypid.json::pidCoefficientStep.
+run_position_trial.py while replacing its legacy hard-coded 0.5 PID
+quantization and enforcing the configured hard return-settling deadline.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
+import sys
 from pathlib import Path
 
 import run_position_trial as worker
@@ -19,12 +21,22 @@ REPO = Path(__file__).resolve().parents[1]
 CONFIG_PATH = REPO / "config" / "discoverypid.json"
 
 
+def load_config() -> dict:
+    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+
 def configured_step() -> float:
-    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    step = float(config["pidCoefficientStep"])
+    step = float(load_config()["pidCoefficientStep"])
     if not math.isfinite(step) or step <= 0.0:
         raise RuntimeError("pidCoefficientStep must be a finite value greater than zero")
     return step
+
+
+def configured_deadline() -> float:
+    deadline = float(load_config()["maxSettlingTimeSeconds"])
+    if not math.isfinite(deadline) or deadline <= 0.0:
+        raise RuntimeError("maxSettlingTimeSeconds must be a finite value greater than zero")
+    return deadline
 
 
 def quantize(value: float, step: float) -> float:
@@ -60,11 +72,49 @@ def quantize_pid(a) -> None:
         )
 
 
-# run_position_trial.main() resolves quantize_pid through its module globals at
-# runtime, so replacing this function removes the legacy 0.5 quantizer without
-# duplicating any serial, recovery, scoring, or CSV logic.
+def enforce_hard_settling_deadline() -> None:
+    """Make the return deadline apply until the run actually completes.
+
+    The legacy worker disabled its deadline after the first sample that merely
+    entered HomePad. That allowed a run to continue indefinitely after a brief
+    pass through the acceptance window. Replace that condition so the deadline
+    remains active until EVENT TEST_COMPLETE terminates the run.
+    """
+    source = inspect.getsource(worker.main)
+    old = (
+        "return_start is not None and not settling_reached\n"
+        "                and now - return_start >= a.max_settling_seconds"
+    )
+    new = (
+        "return_start is not None\n"
+        "                and now - return_start >= a.max_settling_seconds"
+    )
+    if source.count(old) != 1:
+        raise RuntimeError(
+            "Could not patch legacy worker hard-settling deadline safely; "
+            "expected timeout condition was not found exactly once"
+        )
+
+    namespace: dict = {}
+    patched = source.replace(old, new, 1)
+    exec(compile(patched, worker.__file__, "exec"), worker.__dict__, namespace)
+    worker.main = namespace["main"]
+
+
+def ensure_configured_deadline_argument() -> None:
+    """Use the project deadline unless the caller explicitly supplied one."""
+    if "--max-settling-seconds" not in sys.argv:
+        sys.argv.extend(
+            ["--max-settling-seconds", f"{configured_deadline():g}"]
+        )
+
+
+# Keep automated/JMP PID values on the configured grid rather than the legacy
+# 0.5 grid, and keep the return deadline active until the run truly completes.
 worker.quantize_pid = quantize_pid
+enforce_hard_settling_deadline()
 
 
 if __name__ == "__main__":
+    ensure_configured_deadline_argument()
     raise SystemExit(worker.main())
