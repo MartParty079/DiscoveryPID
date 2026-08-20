@@ -14,7 +14,7 @@ from pathlib import Path
 import serial
 from serial import SerialException
 
-EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.7-pure-bidirectional"
+EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.8-final-approach"
 SERIAL_FLOAT_TOL = 1e-3
 ACK_RETRIES = 3
 ACK_TIMEOUT_SECONDS = 2.0
