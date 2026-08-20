@@ -1,16 +1,16 @@
 {
-  "profileName": "Direct PID / 300-degree Bayesian study - sub-1s fast smooth stop objective / progressive seeds",
+  "profileName": "Direct PID / 300-degree Bayesian study - clean sub-1s fast smooth stop objective / 3s hard cutoff",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
   "firmwareId": "DiscoveryPID direct-position-pid-v3.5-smooth-return 2026-08-19",
-  "studyName": "PositionStudy_DirectPID_v42_FastSmooth_300Deg",
+  "studyName": "PositionStudy_DirectPID_v43_CleanFastSmooth_300Deg",
   "testOffsetDeg": 300.0,
   "pidRanges": {
-    "kp": [0.5, 1000.0],
-    "ki": [0.0, 500.0],
-    "kd": [0.0, 200.0]
+    "kp": [0.5, 200.0],
+    "ki": [0.0, 100.0],
+    "kd": [0.0, 50.0]
   },
   "maxSettlingTimeSeconds": 3.0,
   "pidCoefficientStep": 0.5,
@@ -30,17 +30,24 @@
     "abnormalPenalty": 500.0
   },
   "seedSettings": [
-    [0.5, 0.0, 0.5],
-    [1.0, 0.0, 0.5],
-    [2.0, 0.0, 0.5],
-    [5.0, 0.0, 1.0],
-    [10.0, 0.0, 1.0],
-    [20.0, 0.5, 2.0],
-    [40.0, 1.0, 3.0],
-    [80.0, 2.0, 5.0],
-    [160.0, 4.0, 8.0],
-    [320.0, 8.0, 12.0]
+    [4.0, 0.0, 1.0],
+    [6.0, 0.0, 1.0],
+    [8.0, 0.0, 1.5],
+    [10.0, 0.0, 2.0],
+    [15.0, 0.5, 2.5],
+    [25.0, 1.0, 4.0],
+    [40.0, 2.0, 6.0],
+    [70.0, 4.0, 10.0],
+    [120.0, 8.0, 18.0],
+    [200.0, 15.0, 30.0]
   ],
+  "dataPolicy": {
+    "returnDeadlineSeconds": 3.0,
+    "timeoutStatus": "TEST_SETTLING_TIMEOUT",
+    "timeoutRowsEligibleAsBestSetup": false,
+    "recoveryMotionIncludedInScoring": false,
+    "newSessionPerLaunch": true
+  },
   "returnSmoothing": {
     "minimumPwmTaperStartDeg": 12.0,
     "minimumPwmTaperEndDeg": 1.0,
