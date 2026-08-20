@@ -152,7 +152,7 @@ function Start-Manual {
     }
 
     $py = Get-Python
-    $worker = Join-Path $repo "tools\run_position_trial.py"
+    $worker = Join-Path $repo "tools\run_position_trial_configured.py"
     $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $dir = Join-Path $repo "data\manual_trials\$stamp"
     New-Item -ItemType Directory -Force $dir | Out-Null
