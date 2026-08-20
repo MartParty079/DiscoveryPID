@@ -141,10 +141,18 @@ $text = $text.Replace(
     '            "Score,Settling Time (s),Overshoot (deg),Oscillations,IAE (deg*s)," ||',
     '            "Score,Settling Time (s),Overshoot (deg),Oscillations,PWM Chatter,Home Entry RPM,IAE (deg*s)," ||'
 )
-$text = $text.Replace(
-    '                Char( Column( dt, "Oscillations" )[rowIndex] ) || "," ||`r`n                Char( Column( dt, "IAE (deg*s)" )[rowIndex] ) || "," ||',
-    '                Char( Column( dt, "Oscillations" )[rowIndex] ) || "," ||`r`n                Char( Column( dt, "PWM Chatter" )[rowIndex] ) || "," ||`r`n                Char( Column( dt, "Home Entry RPM" )[rowIndex] ) || "," ||`r`n                Char( Column( dt, "IAE (deg*s)" )[rowIndex] ) || "," ||'
-)
+
+$compactRowsOld = @'
+                Char( Column( dt, "Oscillations" )[rowIndex] ) || "," ||
+                Char( Column( dt, "IAE (deg*s)" )[rowIndex] ) || "," ||
+'@
+$compactRowsNew = @'
+                Char( Column( dt, "Oscillations" )[rowIndex] ) || "," ||
+                Char( Column( dt, "PWM Chatter" )[rowIndex] ) || "," ||
+                Char( Column( dt, "Home Entry RPM" )[rowIndex] ) || "," ||
+                Char( Column( dt, "IAE (deg*s)" )[rowIndex] ) || "," ||
+'@
+$text = $text.Replace($compactRowsOld, $compactRowsNew)
 
 $resultListOld = @'
             asNumber( Column( resultDT, "Overshoot (deg)" )[1] ),
@@ -282,6 +290,10 @@ if ($text -notmatch 'New Column\(\s*"PWM Chatter"' -or
 if ($text -notmatch 'Column\( dt, "PWM Chatter" \)\[rowIndex\] = resultList\[6\]' -or
     $text -notmatch 'Column\( dt, "Home Entry RPM" \)\[rowIndex\] = resultList\[7\]') {
     throw "Runtime JSL validation failed: smoothness result mapping missing."
+}
+if ($text -notmatch 'Char\( Column\( dt, "PWM Chatter" \)\[rowIndex\] \)' -or
+    $text -notmatch 'Char\( Column\( dt, "Home Entry RPM" \)\[rowIndex\] \)') {
+    throw "Runtime JSL validation failed: compact CSV smoothness columns missing."
 }
 
 [System.IO.File]::WriteAllText(
