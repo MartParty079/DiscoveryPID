@@ -15,6 +15,13 @@ foreach ($path in @($configPath, $builder, $worker, $template)) {
 
 $config = Get-Content $configPath -Raw | ConvertFrom-Json
 $minimumDrivePWM = [double]$config.minimumDrivePWM
+$minimumRSquare = [double]$config.bayesianOptimization.minimumRSquare
+$missingEntryRpm = [double]$config.dataPolicy.missingHomeEntryRpmResponse
+$chatterCap = [double]$config.dataPolicy.responseTransforms.pwmChatter.cap
+$overshootCap = [double]$config.dataPolicy.responseTransforms.overshootDeg.cap
+$entryRpmCap = [double]$config.dataPolicy.responseTransforms.homeEntryRpm.cap
+$oscillationCap = [double]$config.dataPolicy.responseTransforms.oscillations.cap
+
 $py = Join-Path $env:USERPROFILE ".platformio\penv\Scripts\python.exe"
 if (-not (Test-Path $py)) {
     $command = Get-Command python -ErrorAction SilentlyContinue
@@ -44,24 +51,28 @@ if (-not $text.Contains('minimumDrivePWM = 60.0;')) {
 }
 $text = $text.Replace('minimumDrivePWM = 60.0;', $minimumDriveLiteral)
 
+# Missing settling/entry measurements are right-censored bad responses, not
+# unknown values. Keep every BayesOpt Y numeric before the row reaches JMP.
 $censorPattern = '(?m)^    Close\( resultDT, No Save \);\r?\n\r?\n    // ---------------------------------------------------------------\r?\n    // RELEASE-TO-HOME MEASUREMENT WARNING'
 $censorMatches = [regex]::Matches($text, $censorPattern)
 if ($censorMatches.Count -ne 1) {
     throw "Runtime JSL validation failed: expected one timeout-censor insertion point, found $($censorMatches.Count)."
 }
-$censorReplacement = @'
+$censorReplacement = @"
     Close( resultDT, No Save );
 
     // Keep all MULTI-RESPONSE Y values numeric. A missing settling time means
     // the hard return deadline was not satisfied; record the censor limit.
     If( Is Missing( resultList[2] ), resultList[2] = maxSettlingTimeSeconds );
-    If( Is Missing( resultList[7] ), resultList[7] = 10.0 );
+    If( Is Missing( resultList[7] ), resultList[7] = $missingEntryRpm );
 
     // ---------------------------------------------------------------
     // RELEASE-TO-HOME MEASUREMENT WARNING
-'@
+"@
 $text = [regex]::Replace($text, $censorPattern, $censorReplacement, 1)
 
+# Keep the live data grid in the foreground before each physical run as well as
+# after saved results. The BayesOpt report can exist, but the table stays visible.
 $text = $text.Replace(
     "            resultList =`n                runPhysicalTrial(",
     "            dt << Bring Window To Front;`n            resultList =`n                runPhysicalTrial("
@@ -71,16 +82,23 @@ $text = $text.Replace(
     "        dt << Bring Window To Front;`n        resultList =`n            runPhysicalTrial("
 )
 
+$minimumRSquareLiteral = ("Minimum RSquare( {0:F2} )" -f $minimumRSquare)
 $required = @(
     'MULTI-RESPONSE BAYESOPT DESIRABILITY',
     'BayesOpt mode: MULTI-RESPONSE DESIRABILITY',
+    'v48 response shaping: bounded/log-compressed for GP stability',
     ':Name( "Return Failure" )',
     ':Name( "Settling Time (s)" )',
     ':Name( "PWM Chatter" )',
     ':Name( "Home Entry RPM" )',
     ':Name( "Overshoot (deg)" )',
     ':Oscillations',
+    'Raw PWM Chatter',
+    'Raw Overshoot (deg)',
     'kpHigh = 30.0;',
+    'kiHigh = 10.0;',
+    'kdHigh = 30.0;',
+    $minimumRSquareLiteral,
     $minimumDriveLiteral,
     'If( Is Missing( resultList[2] ), resultList[2] = maxSettlingTimeSeconds );',
     'dt << Bring Window To Front;'
@@ -109,7 +127,9 @@ Write-Host "  Code branch : main"
 Write-Host "  Port        : $Port"
 Write-Host "  Study       : $($config.studyName)"
 Write-Host "  BayesOpt    : MULTI-RESPONSE desirability" -ForegroundColor Yellow
-Write-Host "  Responses   : failure | settling | chatter | entry RPM | overshoot | oscillations"
+Write-Host "  Responses   : failure | settling | bounded chatter | entry RPM | bounded overshoot | oscillations"
+Write-Host "  Conditioning: chatter=ln(1+raw) capped $chatterCap | overshoot cap $overshootCap deg | entry cap $entryRpmCap RPM | osc cap $oscillationCap" -ForegroundColor Green
+Write-Host "  Model gate  : minimum R-square $minimumRSquare (v47 used 0.50)"
 Write-Host "  Score       : diagnostic/setup ranking only; NOT a BayesOpt Y"
 Write-Host "  PID range   : Kp $($config.pidRanges.kp[0])-$($config.pidRanges.kp[1]) | Ki $($config.pidRanges.ki[0])-$($config.pidRanges.ki[1]) | Kd $($config.pidRanges.kd[0])-$($config.pidRanges.kd[1])"
 Write-Host "  PID step    : $($config.pidCoefficientStep)"
@@ -119,6 +139,7 @@ Write-Host "  Displacement: $($config.testOffsetDeg) deg"
 Write-Host "  Target      : <1.0 s, smooth stop"
 Write-Host "  Settle max  : $($config.maxSettlingTimeSeconds) s HARD CUTOFF"
 Write-Host "  Timeout row : Settling=$($config.dataPolicy.timeoutSettlingResponseSeconds) s + Return Failure=1"
+Write-Host "  Raw metrics : preserved in worker run CSV; raw chatter/overshoot also shown in JMP table"
 Write-Host "  Live table  : kept visible/foregrounded through the study" -ForegroundColor Green
 Write-Host "  Runtime JSL : $runtimeScript"
 Write-Host ""
