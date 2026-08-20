@@ -1,5 +1,5 @@
 {
-  "profileName": "Direct pure bidirectional PID / v51 three-response BayesOpt / settling-first zero-overshoot objective / duplicate-free 0.001 grid / 300-degree / 3s cutoff",
+  "profileName": "Direct pure bidirectional PID / v51 three-response BayesOpt / settling-first zero-overshoot objective / duplicate-free 0.001 grid / 300-degree / 5s cutoff",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
@@ -19,7 +19,7 @@
     "ki": [0.0, 20.0],
     "kd": [0.0, 20.0]
   },
-  "maxSettlingTimeSeconds": 3.0,
+  "maxSettlingTimeSeconds": 5.0,
   "pidCoefficientStep": 0.001,
   "serialAckRetries": 3,
   "bayesianOptimization": {
@@ -34,7 +34,7 @@
         "importance": 10.0,
         "lower": [0.60, 1.0],
         "middle": [1.00, 0.80],
-        "upper": [3.0, 0.01]
+        "upper": [5.0, 0.001]
       },
       {
         "name": "Overshoot (deg)",
@@ -74,10 +74,9 @@
     [1.0, 0.0, 0],
     [2.0, 1.0, 1.0],
     [6.0, 0.2, 0.1]
-   
   ],
   "dataPolicy": {
-    "returnDeadlineSeconds": 3.0,
+    "returnDeadlineSeconds": 5.0,
     "timeoutStatus": "TEST_SETTLING_TIMEOUT",
     "catastrophicOvershootDeg": 20.0,
     "catastrophicOvershootStatus": "EXCESSIVE_OVERSHOOT",
@@ -87,12 +86,13 @@
     "newSessionPerLaunch": true,
     "duplicateRoundedPidPolicy": "replace an already-tested rounded PID with the nearest untested 0.001-grid neighbor",
     "returnFailureResponse": "retained as a diagnostic column only; not used as a JMP Bayesian response",
-    "timeoutSettlingResponseSeconds": 3.0,
+    "timeoutSettlingResponseSeconds": 5.0,
     "missingHomeEntryRpmResponse": 10.0,
     "multiResponseRowsRemainNumeric": true,
     "liveJmpTableVisible": true,
     "rawMetricsPreservedInRunCsv": true,
-    "failedTrialThreeResponsePolicy": "non-COMPLETE rows are modeled as Settling=3.0 s, Overshoot=10 deg, Oscillations=3 so failures cannot appear desirable",
+    "homePaddingPolicy": "target remains exactly Home=0; home padding is a symmetric encoder-count acceptance window after the mechanism stops",
+    "failedTrialThreeResponsePolicy": "non-COMPLETE rows are modeled as Settling=5.0 s, Overshoot=10 deg, Oscillations=3 so failures cannot appear desirable",
     "responseTransforms": {
       "pwmChatter": {
         "method": "min(cap, ln(1 + max(0, raw)))",
