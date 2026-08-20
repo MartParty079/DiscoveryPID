@@ -1,18 +1,18 @@
 {
-  "profileName": "Direct pure bidirectional PID / cleaned bounded multi-response BayesOpt / 300-degree / 3s cutoff",
+  "profileName": "Direct pure bidirectional PID / focused v49 multi-response BayesOpt / duplicate-free 0.5 grid / 300-degree / 3s cutoff",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
   "firmwareId": "DiscoveryPID direct-position-pid-v3.7-pure-bidirectional 2026-08-20",
-  "studyName": "PositionStudy_DirectPID_v48_CleanResponses_300Deg",
-  "dataRoot": "position_autotune_directpid_v48_clean_responses",
+  "studyName": "PositionStudy_DirectPID_v49_FocusedNoDuplicates_300Deg",
+  "dataRoot": "position_autotune_directpid_v49_focused_no_duplicates",
   "testOffsetDeg": 300.0,
   "minimumDrivePWM": 80.0,
   "pidRanges": {
-    "kp": [0.5, 30.0],
-    "ki": [0.0, 10.0],
-    "kd": [0.0, 30.0]
+    "kp": [20.0, 26.0],
+    "ki": [5.0, 8.0],
+    "kd": [0.5, 4.0]
   },
   "maxSettlingTimeSeconds": 3.0,
   "pidCoefficientStep": 0.5,
@@ -26,31 +26,31 @@
       {
         "name": "Return Failure",
         "goal": "minimize",
-        "importance": 7.0,
+        "importance": 8.0,
         "lower": [0.0, 1.0],
-        "middle": [0.5, 0.20],
+        "middle": [0.5, 0.15],
         "upper": [1.0, 0.02]
       },
       {
         "name": "Settling Time (s)",
         "goal": "minimize",
-        "importance": 6.0,
+        "importance": 7.0,
         "lower": [0.60, 1.0],
-        "middle": [1.20, 0.75],
-        "upper": [3.0, 0.08]
+        "middle": [1.00, 0.85],
+        "upper": [3.0, 0.05]
       },
       {
         "name": "PWM Chatter",
         "goal": "minimize",
-        "importance": 6.0,
+        "importance": 7.0,
         "lower": [0.0, 1.0],
-        "middle": [1.0, 0.60],
-        "upper": [3.0, 0.08]
+        "middle": [1.0, 0.65],
+        "upper": [3.0, 0.05]
       },
       {
         "name": "Home Entry RPM",
         "goal": "minimize",
-        "importance": 4.0,
+        "importance": 5.0,
         "lower": [0.0, 1.0],
         "middle": [4.0, 0.65],
         "upper": [10.0, 0.08]
@@ -58,18 +58,18 @@
       {
         "name": "Overshoot (deg)",
         "goal": "minimize",
-        "importance": 4.0,
+        "importance": 6.0,
         "lower": [0.0, 1.0],
-        "middle": [2.0, 0.65],
-        "upper": [10.0, 0.08]
+        "middle": [2.0, 0.55],
+        "upper": [10.0, 0.03]
       },
       {
         "name": "Oscillations",
         "goal": "minimize",
-        "importance": 5.0,
+        "importance": 8.0,
         "lower": [0.0, 1.0],
-        "middle": [1.0, 0.45],
-        "upper": [3.0, 0.08]
+        "middle": [1.0, 0.25],
+        "upper": [3.0, 0.02]
       }
     ]
   },
@@ -89,24 +89,28 @@
     "abnormalPenalty": 500.0
   },
   "seedSettings": [
-    [4.0, 0.0, 1.0],
-    [6.0, 0.0, 1.5],
-    [8.0, 0.5, 2.0],
-    [10.0, 0.0, 1.0],
-    [12.0, 2.0, 6.0],
-    [16.0, 1.0, 10.0],
-    [20.0, 4.0, 5.0],
-    [24.0, 3.0, 14.0],
-    [27.0, 7.0, 20.0],
-    [30.0, 10.0, 30.0]
+    [20.0, 5.0, 4.0],
+    [21.0, 6.0, 3.0],
+    [22.0, 7.0, 2.0],
+    [23.0, 6.5, 2.0],
+    [22.5, 6.0, 1.5],
+    [23.5, 6.5, 1.0],
+    [24.0, 6.5, 1.5],
+    [24.5, 7.0, 1.0],
+    [25.0, 7.5, 0.5],
+    [26.0, 8.0, 0.5]
   ],
   "dataPolicy": {
     "returnDeadlineSeconds": 3.0,
     "timeoutStatus": "TEST_SETTLING_TIMEOUT",
+    "catastrophicOvershootDeg": 20.0,
+    "catastrophicOvershootStatus": "EXCESSIVE_OVERSHOOT",
     "timeoutRowsEligibleAsBestSetup": false,
+    "catastrophicOvershootRowsEligibleAsBestSetup": false,
     "recoveryMotionIncludedInScoring": false,
     "newSessionPerLaunch": true,
-    "returnFailureResponse": "0 for COMPLETE; 1 for timeout/error",
+    "duplicateRoundedPidPolicy": "replace with nearest untested 0.5-grid point using normalized PID-space distance",
+    "returnFailureResponse": "0 only for COMPLETE with raw overshoot <= catastrophicOvershootDeg; otherwise 1",
     "timeoutSettlingResponseSeconds": 3.0,
     "missingHomeEntryRpmResponse": 10.0,
     "multiResponseRowsRemainNumeric": true,
@@ -126,7 +130,7 @@
         "cap": 10.0
       },
       "oscillations": {
-        "method": "min(cap, max(0, raw))",
+        "method": "min(cap, max(0, raw count))",
         "cap": 3.0
       }
     }
