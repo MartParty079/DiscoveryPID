@@ -76,9 +76,9 @@ constexpr uint32_t CALIBRATION_STILL_MS = 1500;
 // the net PID command oppose the current shaft motion.
 // ============================================================================
 
-float positionKp = 4.0f;
-float positionKi = 0.0f;
-float positionKd = 0.30f;
+float positionKp = 1.35f;
+float positionKi = 0.40f;
+float positionKd = 0.10f;
 
 constexpr float MIN_POSITION_KP = 0.0f;
 constexpr float MAX_POSITION_KP = 1000.0f;
@@ -121,9 +121,9 @@ constexpr uint8_t POSITION_SETTLE_REQUIRED_SAMPLES = 5;
 constexpr float MIN_TEST_OFFSET_DEG = 5.0f;
 constexpr float MAX_TEST_OFFSET_DEG = 1000000.0f;
 
-float setupKp = 4.0f;
-float setupKi = 0.0f;
-float setupKd = 0.30f;
+float setupKp = 1.35f;
+float setupKi = 0.40f;
+float setupKd = 0.10f;
 
 constexpr float TEST_OFFSET_TOLERANCE_DEG = 1.5f;
 constexpr float TEST_OFFSET_TOLERANCE_RPM = 2.0f;
