@@ -1,11 +1,11 @@
 {
-  "profileName": "Direct PID / 300-degree Bayesian study - clean sub-1s fast smooth stop objective / 3s hard cutoff",
+  "profileName": "Direct PID / 300-degree multi-response Bayesian study - fast smooth stop / 3s hard cutoff",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
   "firmwareId": "DiscoveryPID direct-position-pid-v3.5-smooth-return 2026-08-19",
-  "studyName": "PositionStudy_DirectPID_v43_CleanFastSmooth_300Deg",
+  "studyName": "PositionStudy_DirectPID_v44_MultiResponseFastSmooth_300Deg",
   "testOffsetDeg": 300.0,
   "pidRanges": {
     "kp": [0.5, 200.0],
@@ -15,7 +15,63 @@
   "maxSettlingTimeSeconds": 3.0,
   "pidCoefficientStep": 0.5,
   "serialAckRetries": 3,
+  "bayesianOptimization": {
+    "mode": "multiResponseDesirability",
+    "scalarScoreUsedAsBayesianResponse": false,
+    "scalarScoreRetainedForDiagnosticsAndSetupSelection": true,
+    "responses": [
+      {
+        "name": "Return Failure",
+        "goal": "minimize",
+        "importance": 6.0,
+        "lower": [0.0, 1.0],
+        "middle": [0.5, 0.15],
+        "upper": [1.0, 0.0]
+      },
+      {
+        "name": "Settling Time (s)",
+        "goal": "minimize",
+        "importance": 5.0,
+        "lower": [0.6, 1.0],
+        "middle": [1.0, 0.85],
+        "upper": [3.0, 0.0]
+      },
+      {
+        "name": "PWM Chatter",
+        "goal": "minimize",
+        "importance": 5.0,
+        "lower": [0.0, 1.0],
+        "middle": [0.5, 0.85],
+        "upper": [2.5, 0.0]
+      },
+      {
+        "name": "Home Entry RPM",
+        "goal": "minimize",
+        "importance": 5.0,
+        "lower": [0.0, 1.0],
+        "middle": [2.0, 0.85],
+        "upper": [10.0, 0.0]
+      },
+      {
+        "name": "Overshoot (deg)",
+        "goal": "minimize",
+        "importance": 3.0,
+        "lower": [0.0, 1.0],
+        "middle": [1.0, 0.75],
+        "upper": [5.0, 0.0]
+      },
+      {
+        "name": "Oscillations",
+        "goal": "minimize",
+        "importance": 5.0,
+        "lower": [0.0, 1.0],
+        "middle": [1.0, 0.10],
+        "upper": [2.0, 0.0]
+      }
+    ]
+  },
   "scoreObjective": {
+    "purpose": "diagnostic ranking and best completed setup PID selection only",
     "settlingTargetSeconds": 1.0,
     "speedLinearWeight": 4.0,
     "lateQuadraticWeight": 20.0,
@@ -46,7 +102,9 @@
     "timeoutStatus": "TEST_SETTLING_TIMEOUT",
     "timeoutRowsEligibleAsBestSetup": false,
     "recoveryMotionIncludedInScoring": false,
-    "newSessionPerLaunch": true
+    "newSessionPerLaunch": true,
+    "returnFailureResponse": "0 for COMPLETE; 1 for timeout/error",
+    "undefinedPhysicalResponsesRemainMissing": true
   },
   "returnSmoothing": {
     "minimumPwmTaperStartDeg": 12.0,
