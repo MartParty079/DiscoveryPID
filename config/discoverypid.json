@@ -1,12 +1,12 @@
 {
-  "profileName": "Direct pure bidirectional PID / focused v49 multi-response BayesOpt / duplicate-free 0.5 grid / 300-degree / 3s cutoff",
+  "profileName": "Direct pure bidirectional PID / v50 final-approach smoothing / focused multi-response BayesOpt / duplicate-free 0.5 grid / 300-degree / 3s cutoff",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
-  "firmwareId": "DiscoveryPID direct-position-pid-v3.7-pure-bidirectional 2026-08-20",
-  "studyName": "PositionStudy_DirectPID_v49_FocusedNoDuplicates_300Deg",
-  "dataRoot": "position_autotune_directpid_v49_focused_no_duplicates",
+  "firmwareId": "DiscoveryPID direct-position-pid-v3.8-final-approach 2026-08-20",
+  "studyName": "PositionStudy_DirectPID_v50_FinalApproachSmooth_300Deg",
+  "dataRoot": "position_autotune_directpid_v50_final_approach_smooth",
   "testOffsetDeg": 300.0,
   "minimumDrivePWM": 80.0,
   "pidRanges": {
@@ -136,8 +136,10 @@
     }
   },
   "returnSmoothing": {
-    "minimumPwmTaperStartDeg": 12.0,
-    "minimumPwmTaperEndDeg": 1.0,
+    "minimumPwmTaperStartDeg": 8.0,
+    "minimumPwmTaperEndDeg": 3.0,
+    "integralEnableBandDeg": 2.0,
+    "maximumIntegralContributionPWM": 12.0,
     "outputRpmFilterAlpha": 0.15,
     "fastTelemetryHz": 20,
     "pidGeneratedBidirectionalBraking": true,
