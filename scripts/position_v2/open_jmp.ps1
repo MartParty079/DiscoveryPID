@@ -23,6 +23,10 @@ $chatterCap = [double]$config.dataPolicy.responseTransforms.pwmChatter.cap
 $overshootCap = [double]$config.dataPolicy.responseTransforms.overshootDeg.cap
 $entryRpmCap = [double]$config.dataPolicy.responseTransforms.homeEntryRpm.cap
 $oscillationCap = [double]$config.dataPolicy.responseTransforms.oscillations.cap
+$taperStartDeg = [double]$config.returnSmoothing.minimumPwmTaperStartDeg
+$taperEndDeg = [double]$config.returnSmoothing.minimumPwmTaperEndDeg
+$integralBandDeg = [double]$config.returnSmoothing.integralEnableBandDeg
+$integralMaxPWM = [double]$config.returnSmoothing.maximumIntegralContributionPWM
 
 $py = Join-Path $env:USERPROFILE ".platformio\penv\Scripts\python.exe"
 if (-not (Test-Path $py)) {
@@ -53,9 +57,8 @@ if (-not $text.Contains('minimumDrivePWM = 60.0;')) {
 }
 $text = $text.Replace('minimumDrivePWM = 60.0;', $minimumDriveLiteral)
 
-# Expose the quality-failure threshold inside the runtime JSL. The physical
-# worker remains unchanged; v49 classifies completed-but-wild responses before
-# they are admitted to the Bayesian training table or best-setup selection.
+# Expose the quality-failure threshold inside the runtime JSL. v50 classifies
+# completed-but-wild responses before they are admitted to the Bayesian table.
 $settleLiteral = ("maxSettlingTimeSeconds = {0:F1};" -f [double]$config.maxSettlingTimeSeconds)
 if (-not $text.Contains($settleLiteral)) {
     throw "Runtime JSL validation failed: maxSettlingTimeSeconds literal missing."
@@ -87,10 +90,7 @@ $censorReplacement = @"
 $text = [regex]::Replace($text, $censorPattern, $censorReplacement, 1)
 
 # A trial that technically returns but flies far past home is not a valid
-# controller. Mark it as a failure in the JMP table so it cannot become the
-# best setup PID and Return Failure learns the unstable region.
-# Use a newline-tolerant regex because the Python runtime builder writes LF,
-# while PowerShell here-strings use CRLF on Windows.
+# controller. Mark it as a failure so it cannot become the best setup PID.
 $qualityPattern = '(?m)^\s*Column\( dt, "Status" \)\[rowIndex\] = resultList\[12\];\r?\n\s*Column\( dt, "Return Failure" \)\[rowIndex\] = If\( resultList\[12\] == "COMPLETE", 0, 1 \);'
 $qualityMatches = [regex]::Matches($text, $qualityPattern)
 if ($qualityMatches.Count -ne 1) {
@@ -111,10 +111,8 @@ $qualityReplacement = @'
 '@
 $text = [regex]::Replace($text, $qualityPattern, $qualityReplacement, 1)
 
-# JMP can intentionally request a replicate. After 0.5-step quantization that
-# caused v48 to execute the same PID many times. v49 replaces an already-tested
-# proposal with the nearest untested point on the configured 0.5-grid.
-# This is also newline-tolerant for Windows/LF interoperability.
+# JMP can intentionally request a replicate. After 0.5-step quantization,
+# replace an already-tested proposal with the nearest untested grid point.
 $duplicatePattern = '(?m)^\s*proposedKd = Round\( Column\( dt, "KD" \)\[newRow\] \* 2 \) / 2;\r?\n\s*Column\( dt, "KP" \)\[newRow\] = proposedKp;\r?\n\s*Column\( dt, "KI" \)\[newRow\] = proposedKi;\r?\n\s*Column\( dt, "KD" \)\[newRow\] = proposedKd;'
 $duplicateMatches = [regex]::Matches($text, $duplicatePattern)
 if ($duplicateMatches.Count -ne 1) {
@@ -276,9 +274,10 @@ Write-Host "  Model gate  : minimum R-square $minimumRSquare"
 Write-Host "  Score       : diagnostic/setup ranking only; NOT a BayesOpt Y"
 Write-Host "  PID range   : Kp $($config.pidRanges.kp[0])-$($config.pidRanges.kp[1]) | Ki $($config.pidRanges.ki[0])-$($config.pidRanges.ki[1]) | Kd $($config.pidRanges.kd[0])-$($config.pidRanges.kd[1])"
 Write-Host "  PID step    : $pidStep"
-Write-Host "  PWM floor   : $minimumDrivePWM (tapers near home)"
+Write-Host "  PWM floor   : $minimumDrivePWM; taper $taperStartDeg deg -> $taperEndDeg deg, then floor=0" -ForegroundColor Green
+Write-Host "  Integral    : enabled only inside +/-$integralBandDeg deg; contribution limited to +/-$integralMaxPWM PWM" -ForegroundColor Green
 Write-Host "  Controller  : 100 Hz pure signed PID; reverse PWM is PID braking; zero PWM coasts" -ForegroundColor Green
-Write-Host "  Firmware    : UNCHANGED v3.7 pure bidirectional PID"
+Write-Host "  Firmware    : v3.8 final-approach smoothing (flash required)" -ForegroundColor Yellow
 Write-Host "  Displacement: $($config.testOffsetDeg) deg"
 Write-Host "  Target      : <1.0 s, smooth stop, zero oscillations"
 Write-Host "  Settle max  : $($config.maxSettlingTimeSeconds) s HARD CUTOFF"
