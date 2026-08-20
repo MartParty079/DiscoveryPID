@@ -25,9 +25,9 @@ $sessionDir = Join-Path $repo "data\position_autotune_directpid_v43_clean_fastsm
 New-Item -ItemType Directory -Force $sessionDir | Out-Null
 
 # Create a machine-specific runtime copy. Physical-control logic remains in the
-# tracked Python worker; this copy only injects paths/port, the current ranges
-# and seed design, and snaps JMP's table values to the 0.5 PID grid so the
-# recorded factors equal what the motor actually runs.
+# tracked Python worker; this copy only injects paths/port, current ranges,
+# progressive seeds, and clean response columns. Exact tested gains are snapped
+# to the 0.5 PID grid before the physical worker is launched.
 $runtimeScript = Join-Path $env:TEMP "DiscoveryPID_Position_V2_runtime.jsl"
 $text = Get-Content $sourceScript -Raw
 $repoJsl = ($repo -replace '\\', '/') + '/'
@@ -97,6 +97,107 @@ $text = [regex]::Replace(
     1
 )
 
+# Add the smoothness measurements that are already produced by Python to the
+# working JMP table and compact CSV. This keeps one row self-contained.
+$metricColumnsOld = @'
+        New Column(
+            "Oscillations",
+            Numeric,
+            Ordinal,
+            Format( "Best", 12 )
+        ),
+
+        New Column(
+            "IAE (deg*s)",
+'@
+$metricColumnsNew = @'
+        New Column(
+            "Oscillations",
+            Numeric,
+            Ordinal,
+            Format( "Best", 12 )
+        ),
+
+        New Column(
+            "PWM Chatter",
+            Numeric,
+            Continuous,
+            Format( "Fixed Dec", 12, 6 )
+        ),
+
+        New Column(
+            "Home Entry RPM",
+            Numeric,
+            Continuous,
+            Format( "Fixed Dec", 12, 6 )
+        ),
+
+        New Column(
+            "IAE (deg*s)",
+'@
+$text = $text.Replace($metricColumnsOld, $metricColumnsNew)
+
+$text = $text.Replace(
+    '            "Score,Settling Time (s),Overshoot (deg),Oscillations,IAE (deg*s)," ||',
+    '            "Score,Settling Time (s),Overshoot (deg),Oscillations,PWM Chatter,Home Entry RPM,IAE (deg*s)," ||'
+)
+$text = $text.Replace(
+    '                Char( Column( dt, "Oscillations" )[rowIndex] ) || "," ||`r`n                Char( Column( dt, "IAE (deg*s)" )[rowIndex] ) || "," ||',
+    '                Char( Column( dt, "Oscillations" )[rowIndex] ) || "," ||`r`n                Char( Column( dt, "PWM Chatter" )[rowIndex] ) || "," ||`r`n                Char( Column( dt, "Home Entry RPM" )[rowIndex] ) || "," ||`r`n                Char( Column( dt, "IAE (deg*s)" )[rowIndex] ) || "," ||'
+)
+
+$resultListOld = @'
+            asNumber( Column( resultDT, "Overshoot (deg)" )[1] ),
+            asNumber( Column( resultDT, "Oscillations" )[1] ),
+            asNumber( Column( resultDT, "IAE (deg*s)" )[1] ),
+            asNumber( Column( resultDT, "Peak Output RPM" )[1] ),
+            asNumber( Column( resultDT, "Final Error (deg)" )[1] ),
+            asNumber( Column( resultDT, "Success" )[1] ),
+            statusText,
+            asNumber( Column( resultDT, "Samples" )[1] )
+'@
+$resultListNew = @'
+            asNumber( Column( resultDT, "Overshoot (deg)" )[1] ),
+            asNumber( Column( resultDT, "Oscillations" )[1] ),
+            asNumber( Column( resultDT, "PWM Chatter" )[1] ),
+            asNumber( Column( resultDT, "Home Entry RPM" )[1] ),
+            asNumber( Column( resultDT, "IAE (deg*s)" )[1] ),
+            asNumber( Column( resultDT, "Peak Output RPM" )[1] ),
+            asNumber( Column( resultDT, "Final Error (deg)" )[1] ),
+            asNumber( Column( resultDT, "Success" )[1] ),
+            statusText,
+            asNumber( Column( resultDT, "Samples" )[1] )
+'@
+$text = $text.Replace($resultListOld, $resultListNew)
+
+# Result-list positions after adding Chatter and Home Entry RPM:
+# 1 Score, 2 Settle, 3 Timer, 4 Overshoot, 5 Osc, 6 Chatter, 7 EntryRPM,
+# 8 IAE, 9 PeakRPM, 10 FinalError, 11 Success, 12 Status, 13 Samples.
+$text = $text.Replace('resultList[10]', 'resultList[12]')
+$text = $text.Replace('resultList[11]', 'resultList[13]')
+
+$saveMetricsOld = @'
+    Column( dt, "Overshoot (deg)" )[rowIndex] = resultList[4];
+    Column( dt, "Oscillations" )[rowIndex] = resultList[5];
+    Column( dt, "IAE (deg*s)" )[rowIndex] = resultList[6];
+    Column( dt, "Peak Output RPM" )[rowIndex] = resultList[7];
+    Column( dt, "Final Error (deg)" )[rowIndex] = resultList[8];
+    Column( dt, "Success" )[rowIndex] = resultList[9];
+    Column( dt, "Status" )[rowIndex] = resultList[12];
+'@
+$saveMetricsNew = @'
+    Column( dt, "Overshoot (deg)" )[rowIndex] = resultList[4];
+    Column( dt, "Oscillations" )[rowIndex] = resultList[5];
+    Column( dt, "PWM Chatter" )[rowIndex] = resultList[6];
+    Column( dt, "Home Entry RPM" )[rowIndex] = resultList[7];
+    Column( dt, "IAE (deg*s)" )[rowIndex] = resultList[8];
+    Column( dt, "Peak Output RPM" )[rowIndex] = resultList[9];
+    Column( dt, "Final Error (deg)" )[rowIndex] = resultList[10];
+    Column( dt, "Success" )[rowIndex] = resultList[11];
+    Column( dt, "Status" )[rowIndex] = resultList[12];
+'@
+$text = $text.Replace($saveMetricsOld, $saveMetricsNew)
+
 # Quantize both initial seeds and Bayesian proposals to the nearest 0.5.
 $text = $text.Replace(
     '        seedKp = seedSettings[seedIndex][1];',
@@ -148,7 +249,7 @@ $text = [regex]::Replace(
 $text = $text.Replace('    "\!\"" || Char( value ) || "\!\""', '    "\!"" || Char( value ) || "\!""')
 
 # Refuse to launch a partially patched runtime study. This catches stale study
-# identity, ranges, seed design, or loss of the common 3-second worker cutoff.
+# identity, ranges, seed design, data columns, or loss of the common 3-second cutoff.
 if ($text -notmatch [regex]::Escape($workerJsl)) {
     throw "Runtime JSL validation failed: physical worker path was not injected."
 }
@@ -174,6 +275,14 @@ if ($text -notmatch '\{4\.0,\s+0\.0,\s+1\.0\}' -or
     $text -notmatch '\{200\.0,\s+15\.0,\s+30\.0\}') {
     throw "Runtime JSL validation failed: clean progressive seed design missing."
 }
+if ($text -notmatch 'New Column\(\s*"PWM Chatter"' -or
+    $text -notmatch 'New Column\(\s*"Home Entry RPM"') {
+    throw "Runtime JSL validation failed: smoothness data columns missing."
+}
+if ($text -notmatch 'Column\( dt, "PWM Chatter" \)\[rowIndex\] = resultList\[6\]' -or
+    $text -notmatch 'Column\( dt, "Home Entry RPM" \)\[rowIndex\] = resultList\[7\]') {
+    throw "Runtime JSL validation failed: smoothness result mapping missing."
+}
 
 [System.IO.File]::WriteAllText(
     $runtimeScript,
@@ -191,6 +300,7 @@ Write-Host "  PID step    : 0.5"
 Write-Host "  Displacement: 300 deg"
 Write-Host "  Target      : <1.0 s, smooth stop"
 Write-Host "  Settle max  : 3.0 s HARD CUTOFF (seeds + Bayesian)"
+Write-Host "  Data        : score + settle + overshoot + oscillations + chatter + entry RPM"
 Write-Host "  ACK retries : 3"
 Write-Host "  Runtime JSL : $runtimeScript"
 Invoke-Item $runtimeScript
