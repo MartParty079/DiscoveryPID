@@ -102,15 +102,19 @@ function Start-Home {
 }
 
 function Start-Test {
+    $kp = [double]$project.defaultPID.kp
+    $ki = [double]$project.defaultPID.ki
+    $kd = [double]$project.defaultPID.kd
+
     Write-Host "TEST mode" -ForegroundColor Cyan
-    Write-Host "Known baseline: Kp=10.0 Ki=0.0 Kd=1.0, displacement=300 deg"
+    Write-Host ("Default baseline: Kp={0:F3} Ki={1:F3} Kd={2:F3}, displacement=300 deg" -f $kp, $ki, $kd)
 
     & (Join-Path $repo "scripts\position_v2\control_test.ps1") `
         -Port $script:ActivePort `
         -TestOffsetDeg 300.0 `
-        -Kp 10.0 `
-        -Ki 0.0 `
-        -Kd 1.0
+        -Kp $kp `
+        -Ki $ki `
+        -Kd $kd
 
     if ($LASTEXITCODE -ne 0) { throw "Physical TEST mode failed." }
 }
@@ -122,11 +126,15 @@ function Start-Jmp {
 
 function Start-Manual {
     $pidStep = [double]$project.pidCoefficientStep
+    $setupKp = [double]$project.defaultPID.kp
+    $setupKi = [double]$project.defaultPID.ki
+    $setupKd = [double]$project.defaultPID.kd
 
     Write-Host ""
     Write-Host "MANUAL PID mode" -ForegroundColor Cyan
     Write-Host "Enter one PID set for a single 300-degree physical trial."
     Write-Host "Values are rounded to the nearest $pidStep before running."
+    Write-Host ("Outbound/setup PID stays at default Kp={0:F3} Ki={1:F3} Kd={2:F3}." -f $setupKp, $setupKi, $setupKd)
     Write-Host ""
 
     $kp = Read-PidValue "Kp" ([double]$project.pidRanges.kp[0]) ([double]$project.pidRanges.kp[1])
@@ -135,10 +143,11 @@ function Start-Manual {
     $minimumDrivePWM = [double]$project.minimumDrivePWM
 
     Write-Host ""
-    Write-Host "Exact PID to run:" -ForegroundColor Yellow
+    Write-Host "Exact return PID to run:" -ForegroundColor Yellow
     Write-Host ("  Kp = {0:F3}" -f $kp)
     Write-Host ("  Ki = {0:F3}" -f $ki)
     Write-Host ("  Kd = {0:F3}" -f $kd)
+    Write-Host ("  Setup PID = {0:F3} / {1:F3} / {2:F3}" -f $setupKp, $setupKi, $setupKd)
     Write-Host "  Displacement = 300 deg"
     Write-Host "  Settling max = 3.0 s HARD CUTOFF"
     Write-Host "  PWM floor = $minimumDrivePWM (tapers near home)"
@@ -174,9 +183,9 @@ function Start-Manual {
         --home-padding-pulses 2 `
         --max-settling-seconds 3 `
         --minimum-drive-pwm $minimumDrivePWM `
-        --setup-kp $kp `
-        --setup-ki $ki `
-        --setup-kd $kd `
+        --setup-kp $setupKp `
+        --setup-ki $setupKi `
+        --setup-kd $setupKd `
         --result-file $result `
         --raw-file $raw `
         --history-file $history
@@ -204,15 +213,16 @@ DiscoveryPID modes
       Force fresh home/calibration.
 
   .\DiscoveryPID.ps1 test
-      Run the fixed baseline physical test:
-      Kp=10, Ki=0, Kd=1, 300-degree displacement.
+      Run the configured default PID physical test:
+      Kp=$($project.defaultPID.kp), Ki=$($project.defaultPID.ki), Kd=$($project.defaultPID.kd), 300-degree displacement.
 
   .\DiscoveryPID.ps1 jmp
       Launch the current JMP Bayesian study.
       Current PID limits and rounding come from config/discoverypid.json.
 
   .\DiscoveryPID.ps1 manual
-      Prompt for Kp/Ki/Kd and run one physical trial.
+      Prompt for return Kp/Ki/Kd and run one physical trial.
+      The outbound/setup move uses the configured default PID.
       PID values are rounded to the nearest $($project.pidCoefficientStep) and use configured limits.
 
 Run .\DiscoveryPID.ps1 with no command for the four-option menu.
@@ -226,12 +236,13 @@ function Show-Menu {
         Write-Host "DiscoveryPID" -ForegroundColor Cyan
         Write-Host $project.profileName -ForegroundColor DarkCyan
         Write-Host "Port: $($script:ActivePort)"
+        Write-Host ("Default PID: Kp={0:F3} Ki={1:F3} Kd={2:F3}" -f [double]$project.defaultPID.kp, [double]$project.defaultPID.ki, [double]$project.defaultPID.kd)
         Write-Host "PID limits: Kp <= $($project.pidRanges.kp[1]), Ki <= $($project.pidRanges.ki[1]), Kd <= $($project.pidRanges.kd[1])"
         Write-Host "PID rounding: nearest $($project.pidCoefficientStep)"
         Write-Host "PWM floor: $($project.minimumDrivePWM)"
         Write-Host ""
         Write-Host "[1] HOME   - recalibrate / set zero"
-        Write-Host "[2] TEST   - fixed baseline 300-degree physical test"
+        Write-Host "[2] TEST   - default PID 300-degree physical test"
         Write-Host "[3] JMP    - Bayesian optimization"
         Write-Host "[4] MANUAL - enter Kp / Ki / Kd"
         Write-Host "[P] PORT   - change serial port"
