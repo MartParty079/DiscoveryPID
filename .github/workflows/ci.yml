@@ -70,12 +70,24 @@ jobs:
           assert cfg['maxSettlingTimeSeconds'] == 3.0
           assert cfg['pidCoefficientStep'] == 0.5
           assert cfg['serialAckRetries'] == 3
-          assert cfg['studyName'] == 'PositionStudy_DirectPID_v41_300Deg_MainRebuild'
+          assert cfg['studyName'] == 'PositionStudy_DirectPID_v42_FastSmooth_300Deg'
           assert cfg['firmwareId'] == 'DiscoveryPID direct-position-pid-v3.5-smooth-return 2026-08-19'
-          assert cfg['scoreWeights']['settlingTime'] == 2.0
-          assert cfg['scoreWeights']['overshoot'] == 1.0
-          assert cfg['scoreWeights']['oscillations'] == 0.5
-          assert cfg['scoreWeights']['pwmChatter'] == 4.0
+
+          objective = cfg['scoreObjective']
+          assert objective['settlingTargetSeconds'] == 1.0
+          assert objective['speedLinearWeight'] == 4.0
+          assert objective['lateQuadraticWeight'] == 20.0
+          assert objective['pwmChatterWeight'] == 8.0
+          assert objective['homeEntryRpmSquaredWeight'] == 0.15
+          assert objective['overshootLinearWeight'] == 0.75
+          assert objective['overshootSquaredWeight'] == 0.20
+          assert objective['oscillationWeight'] == 5.0
+          assert objective['iaeWeight'] == 0.003
+          assert objective['finalErrorWeight'] == 0.20
+          assert cfg['seedSettings'][0] == [0.5, 0.0, 0.5]
+          assert cfg['seedSettings'][4] == [10.0, 0.0, 1.0]
+          assert cfg['seedSettings'][-1] == [320.0, 8.0, 12.0]
+
           assert cfg['returnSmoothing']['minimumPwmTaperStartDeg'] == 12.0
           assert cfg['returnSmoothing']['minimumPwmTaperEndDeg'] == 1.0
           assert cfg['returnSmoothing']['outputRpmFilterAlpha'] == 0.15
@@ -99,13 +111,19 @@ jobs:
           assert 'def round_half' in py
           assert 'def send_with_ack' in py
           assert 'def pwm_chatter_penalty' in py
+          assert 'def home_entry_rpm' in py
+          assert '"Home Entry RPM"' in py
           assert 'TEST command accepted; waiting for physical TEST_OUT motion.' in py
           assert 'status = "TEST_SETTLING_TIMEOUT"' in py
           assert 'default=300.0' in py
           assert 'default=60.0' in py
           assert 'default=3.0' in py
-          assert '2.0 * settling_for_score + 1.0 * overshoot + 0.5 * oscillations' in py
-          assert '+ 4.0 * chatter + 0.01 * iae + 0.25 * final_error' in py
+          assert 'late_seconds = max(0.0, settling_for_score - 1.0)' in py
+          assert 'speed_score = 4.0 * settling_for_score + 20.0 * late_seconds * late_seconds' in py
+          assert 'smoothness_score = 8.0 * chatter + 0.15 * entry_rpm_for_score * entry_rpm_for_score' in py
+          assert 'overshoot_score = 0.75 * overshoot + 0.20 * overshoot * overshoot' in py
+          assert 'oscillation_score = 5.0 * oscillations' in py
+          assert 'tracking_score = 0.003 * iae + 0.20 * final_error' in py
           assert '+ (25.0 if timed_out else 0.0) + (500.0 if abnormal else 0.0)' in py
 
           assert 'studyName = "PositionStudy_DirectPID_v39_300Deg10xRange_3s";' in jsl
@@ -119,7 +137,11 @@ jobs:
 
           assert 'tools\\run_position_trial.py' in launcher
           assert 'run_position_trial_halfstep.py' not in launcher
-          assert 'PositionStudy_DirectPID_v41_300Deg_MainRebuild' in launcher
+          assert 'PositionStudy_DirectPID_v42_FastSmooth_300Deg' in launcher
+          assert '{0.5,    0.0,  0.5}' in launcher
+          assert '{10.0,   0.0,  1.0}' in launcher
+          assert '{320.0,  8.0, 12.0}' in launcher
+          assert 'Target      : <1.0 s, smooth stop' in launcher
           assert 'PID step    : 0.5' in launcher
           assert 'ACK retries : 3' in launcher
           assert 'Runtime JSL validation failed' in launcher
