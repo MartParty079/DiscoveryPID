@@ -2,13 +2,14 @@
 // Arduino Mega 2560 + Adafruit 4416 geared motor + DRV8871.
 //
 // Control architecture:
-//   TEST_OUT: best-scoring completed PID so far -> PWM directly
-//   TEST_RETURN: current candidate PID -> PWM directly
+//   TEST_OUT: best-scoring completed PID so far -> signed PWM directly
+//   TEST_RETURN: current candidate PID -> signed PWM directly
 //
 // The position PID runs locally on the Mega every 10 ms. Encoder quadrature
-// edges are counted asynchronously by interrupts. Unlike v3.5, an opposite PID
-// command is NOT suppressed until the shaft nearly stops: the D term is allowed
-// to command immediate reverse torque for real active braking.
+// edges are counted asynchronously by interrupts. Opposite-sign PID output is
+// applied immediately, so the D term can generate reverse torque before the
+// target is crossed. There is NO separate hardware-brake algorithm: PID=0
+// means motor coast. Braking torque comes only from signed PID output.
 
 #include <Arduino.h>
 #include <EEPROM.h>
@@ -17,11 +18,8 @@
 #include <string.h>
 
 const char FIRMWARE_VERSION[] =
-    "DiscoveryPID direct-position-pid-v3.6-active-brake 2026-08-20";
+    "DiscoveryPID direct-position-pid-v3.7-pure-bidirectional 2026-08-20";
 
-// Preserve a known-good home across a USB serial reset. Only a validity marker
-// is stored; after reboot the encoder starts at zero, so this is safe only when
-// the mechanism was physically at home before the reset.
 constexpr int EEPROM_HOME_MAGIC_ADDRESS = 0;
 constexpr uint32_t EEPROM_HOME_MAGIC = 0x44504944UL; // "DPID"
 
@@ -74,8 +72,8 @@ constexpr uint32_t CALIBRATION_STILL_MS = 1500;
 //
 // PWM = Kp*positionError + Ki*integral - Kd*measuredPositionVelocity
 //
-// Kd therefore becomes genuine braking torque when approach velocity is high
-// enough to make the net command oppose the current shaft motion.
+// Kd therefore becomes genuine braking torque when approach velocity makes
+// the net PID command oppose the current shaft motion.
 // ============================================================================
 
 float positionKp = 4.0f;
@@ -92,14 +90,13 @@ constexpr float MAX_POSITION_KD = 200.0f;
 constexpr float MAX_PWM_COMMAND = 225.0f;
 float maximumReturnPWM = 225.0f;
 
-// Requested system default. The full 80-PWM breakaway floor is used far from
-// home and smoothly tapered away during the final approach.
+// Full breakaway floor far from home; tapered away during final approach.
 float minimumDrivePWM = 80.0f;
 constexpr float RETURN_MIN_PWM_TAPER_START_DEG = 12.0f;
 constexpr float RETURN_MIN_PWM_TAPER_END_DEG = 1.0f;
 
 // Encoder velocity is quantized at the 10 ms control rate. Filtering suppresses
-// one-count derivative noise while still providing a useful D-term velocity.
+// one-count derivative noise while retaining useful D-term braking response.
 constexpr float OUTPUT_RPM_FILTER_ALPHA = 0.15f;
 
 constexpr float POSITION_INTEGRAL_LIMIT = 80.0f;
@@ -113,12 +110,6 @@ constexpr float POSITION_DEADBAND_RPM = 1.20f;
 
 long homePaddingPulses = 2;
 constexpr uint8_t POSITION_SETTLE_REQUIRED_SAMPLES = 5;
-
-// When PID asks for essentially zero but the shaft is still moving, use the
-// DRV8871 brake state (IN1=HIGH, IN2=HIGH) rather than coasting. Once nearly
-// stationary, release to coast so there is no unnecessary held brake state.
-constexpr float ACTIVE_BRAKE_COMMAND_DEADBAND_PWM = 0.5f;
-constexpr float ACTIVE_BRAKE_RELEASE_RPM = 0.35f;
 
 // ============================================================================
 // TEST PROFILE
@@ -197,7 +188,6 @@ Mode mode = Mode::CALIBRATING;
 bool homed = false;
 bool positionDeadbandActive = false;
 bool positionSettledLatch = false;
-bool motorBrakeActive = false;
 uint8_t positionSettleSamples = 0;
 
 unsigned long trialNumber = 0;
@@ -218,44 +208,30 @@ uint32_t previousControlTime = 0;
 uint32_t modeEnteredAt = 0;
 uint32_t conditionStartedAt = 0;
 
-// Calibration state.
 long calibrationMinimumCount = 0;
 long calibrationMaximumCount = 0;
 int8_t calibrationLastDirection = 0;
 uint8_t calibrationReversals = 0;
 uint32_t calibrationLastMotionAt = 0;
 
-// Test state.
 float testOffsetDeg = 300.0f;
-
 char faultCode[32] = "NONE";
 
 // ============================================================================
 // MOTOR OUTPUT
 // ============================================================================
 
-// DRV8871 truth table:
-//   IN1=0 IN2=0 -> coast / high-Z
-//   IN1=0 IN2=1 -> one drive direction
-//   IN1=1 IN2=0 -> opposite drive direction
-//   IN1=1 IN2=1 -> brake / low-side slow decay
+// DRV8871 usage for this pure-PID study:
+//   IN1=0 IN2=0 -> coast
+//   IN1=0 IN2=PWM -> one signed drive direction
+//   IN1=PWM IN2=0 -> opposite signed drive direction
+// Hardware IN1=1 / IN2=1 braking is intentionally NOT used.
 
 void setMotorCoast()
 {
     analogWrite(MOTOR_IN1_PIN, 0);
     analogWrite(MOTOR_IN2_PIN, 0);
     appliedMotorCommand = 0.0f;
-    motorBrakeActive = false;
-}
-
-void setMotorBrake()
-{
-    // digitalWrite disables PWM output on these Arduino PWM pins and holds both
-    // DRV8871 inputs high, selecting the hardware brake state.
-    digitalWrite(MOTOR_IN1_PIN, HIGH);
-    digitalWrite(MOTOR_IN2_PIN, HIGH);
-    appliedMotorCommand = 0.0f;
-    motorBrakeActive = true;
 }
 
 void setMotorDrive(float command)
@@ -272,9 +248,6 @@ void setMotorDrive(float command)
         return;
     }
 
-    motorBrakeActive = false;
-
-    // Preserve the existing mechanism direction convention.
     if (command > 0.0f)
     {
         analogWrite(MOTOR_IN1_PIN, 0);
@@ -291,24 +264,10 @@ void setMotorDrive(float command)
 
 void applyClosedLoopMotorCommand(float desiredCommand)
 {
-    // This is the key v3.6 behavior change. Opposite-sign PID output is applied
-    // immediately; there is no coast-to-zero reversal interlock. This lets the
-    // D term actively brake before the mechanism reaches home.
-    if (fabsf(desiredCommand) > ACTIVE_BRAKE_COMMAND_DEADBAND_PWM)
-    {
-        setMotorDrive(desiredCommand);
-        return;
-    }
-
-    // If the PID has tapered to zero while the mechanism still has momentum,
-    // short the motor through the DRV8871 low-side brake state.
-    if (fabsf(measuredOutputRPM) > ACTIVE_BRAKE_RELEASE_RPM)
-    {
-        setMotorBrake();
-        return;
-    }
-
-    setMotorCoast();
+    // No coast-before-reverse interlock and no separate brake state.
+    // Every 10 ms, the signed PID output is applied directly. If Kd makes the
+    // command oppose motion, that signed reverse PWM is the braking torque.
+    setMotorDrive(desiredCommand);
 }
 
 void resetControllers()
@@ -471,7 +430,6 @@ bool updatePositionSettledLatch(long currentCount, long deltaCount)
 
 void updateCalibration(long currentCount, long deltaCount, uint32_t now)
 {
-    // Calibration must remain freely movable by hand.
     setMotorCoast();
 
     if (currentCount < calibrationMinimumCount) calibrationMinimumCount = currentCount;
@@ -769,7 +727,6 @@ void printStatus()
     Serial.print(" SKI="); Serial.print(setupKi, 6);
     Serial.print(" SKD="); Serial.print(setupKd, 6);
     Serial.print(" Settled="); Serial.print(positionSettledLatch ? 1 : 0);
-    Serial.print(" Brake="); Serial.print(motorBrakeActive ? 1 : 0);
     Serial.print(" KP="); Serial.print(positionKp, 6);
     Serial.print(" KI="); Serial.print(positionKi, 6);
     Serial.print(" KD="); Serial.print(positionKd, 6);
@@ -1104,7 +1061,6 @@ void printTelemetry(long currentCount, long deltaCount, float currentPositionDeg
     Serial.print(" SKP="); Serial.print(setupKp, 4);
     Serial.print(" SKI="); Serial.print(setupKi, 4);
     Serial.print(" SKD="); Serial.print(setupKd, 4);
-    Serial.print(" Brake="); Serial.print(motorBrakeActive ? 1 : 0);
     Serial.print(" PWM="); Serial.println(appliedMotorCommand, 1);
 }
 
@@ -1211,7 +1167,6 @@ void loop()
                 useSetupController
             );
 
-            // No coast-before-reverse interlock. PID is applied every 10 ms.
             applyClosedLoopMotorCommand(desiredPWM);
         }
     }
@@ -1233,8 +1188,7 @@ void loop()
             !positionSettledLatch &&
             (fabsf(positionErrorDeg) >= 0.9f ||
              fabsf(measuredOutputRPM) >= 1.0f ||
-             fabsf(appliedMotorCommand) >= 1.0f ||
-             motorBrakeActive);
+             fabsf(appliedMotorCommand) >= 1.0f);
 
         if (worthShowing && ++humanTelemetryDivider >= HUMAN_TELEMETRY_DIVIDER)
         {
@@ -1243,7 +1197,6 @@ void loop()
             Serial.print("deg Err="); Serial.print(positionErrorDeg, 2);
             Serial.print("deg RPM="); Serial.print(measuredOutputRPM, 1);
             Serial.print(" PWM="); Serial.print(appliedMotorCommand, 0);
-            Serial.print(" Brake="); Serial.print(motorBrakeActive ? 1 : 0);
             Serial.print(" Mode="); Serial.println(static_cast<uint8_t>(mode));
         }
 
