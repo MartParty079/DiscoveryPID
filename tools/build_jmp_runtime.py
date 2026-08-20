@@ -63,7 +63,7 @@ def main() -> int:
     repo = a.repo.resolve()
     config = json.loads((repo / "config" / "discoverypid.json").read_text(encoding="utf-8"))
     source = repo / "jmp" / "DiscoveryPID_Position_V2.jsl"
-    worker = repo / "tools" / "run_position_trial.py"
+    worker = repo / "tools" / "run_position_trial_configured.py"
     text = source.read_text(encoding="utf-8")
 
     kp_low, kp_high = config["pidRanges"]["kp"]
@@ -415,8 +415,11 @@ def main() -> int:
     # Final runtime validation before anything physical is launched.
     required = [
         study_name,
+        f"kpLow = {kp_low:.1f};",
         f"kpHigh = {kp_high:.1f};",
+        f"kiLow = {ki_low:.1f};",
         f"kiHigh = {ki_high:.1f};",
+        f"kdLow = {kd_low:.1f};",
         f"kdHigh = {kd_high:.1f};",
         f"Minimum RSquare( {minimum_rsquare:.2f} )",
         "MULTI-RESPONSE BAYESOPT DESIRABILITY",
@@ -437,6 +440,7 @@ def main() -> int:
         proposed_kp_quant.strip(),
         proposed_ki_quant.strip(),
         f'proposedKd = Round( Column( dt, "KD" )[newRow] / {pid_step_jsl} ) * {pid_step_jsl};',
+        jsl_path(worker),
     ]
     missing = [token for token in required if token not in text]
     if missing:
@@ -451,6 +455,7 @@ def main() -> int:
     print("Responses: Return Failure, Settling Time, PWM Chatter, Home Entry RPM, Overshoot, Oscillations")
     print(f"PID range: Kp {kp_low:g}-{kp_high:g}, Ki {ki_low:g}-{ki_high:g}, Kd {kd_low:g}-{kd_high:g}")
     print(f"PID coefficient rounding: nearest {pid_step:g}")
+    print(f"Physical worker: {worker}")
     print(f"BayesOpt minimum R-square: {minimum_rsquare:.2f}")
     print(f"Settling timeout: {max_settle:.1f} s; timeout rows export Settling Time={max_settle:.1f} and Return Failure=1")
     print(f"Response caps: chatter={chatter_cap:g}, overshoot={overshoot_cap:g} deg, entryRPM={entry_rpm_cap:g}, oscillations={oscillation_cap:g}")
