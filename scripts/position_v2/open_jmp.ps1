@@ -38,17 +38,17 @@ if ($LASTEXITCODE -ne 0) {
     throw "JMP runtime build failed with exit code $LASTEXITCODE."
 }
 
+$text = Get-Content $runtimeScript -Raw
+
 # A 3-second timeout is a right-censored bad settling response, not an unknown
 # response. Keep every BayesOpt Y numeric while Return Failure explicitly marks
-# the run as invalid. Likewise, no home entry gets the worst configured entry
-# RPM response instead of a blank Y cell.
-$text = Get-Content $runtimeScript -Raw
-$censorAnchor = @'
-    Close( resultDT, No Save );
-
-    // ---------------------------------------------------------------
-    // RELEASE-TO-HOME MEASUREMENT WARNING
-'@
+# the run as invalid. Use a newline-agnostic regex so Windows Git/PowerShell line
+# endings cannot silently defeat this patch.
+$censorPattern = '(?m)^    Close\( resultDT, No Save \);\r?\n\r?\n    // ---------------------------------------------------------------\r?\n    // RELEASE-TO-HOME MEASUREMENT WARNING'
+$censorMatches = [regex]::Matches($text, $censorPattern)
+if ($censorMatches.Count -ne 1) {
+    throw "Runtime JSL validation failed: expected one timeout-censor insertion point, found $($censorMatches.Count)."
+}
 $censorReplacement = @'
     Close( resultDT, No Save );
 
@@ -60,10 +60,19 @@ $censorReplacement = @'
     // ---------------------------------------------------------------
     // RELEASE-TO-HOME MEASUREMENT WARNING
 '@
-if (-not $text.Contains($censorAnchor)) {
-    throw "Runtime JSL validation failed: timeout-censor insertion point missing."
-}
-$text = $text.Replace($censorAnchor, $censorReplacement)
+$text = [regex]::Replace($text, $censorPattern, $censorReplacement, 1)
+
+# Keep the optimization table in front immediately before every physical run as
+# well as after each saved result. That way the live data grid remains the main
+# JMP window while Python owns the COM port.
+$text = $text.Replace(
+    "            resultList =`n                runPhysicalTrial(",
+    "            dt << Bring Window To Front;`n            resultList =`n                runPhysicalTrial("
+)
+$text = $text.Replace(
+    "        resultList =`n            runPhysicalTrial(",
+    "        dt << Bring Window To Front;`n        resultList =`n            runPhysicalTrial("
+)
 
 # Validate the final file that JMP will actually execute.
 $required = @(
@@ -87,6 +96,9 @@ foreach ($token in $required) {
 if ($text.Contains('Y( :Score )')) {
     throw "Runtime JSL validation failed: scalar Score is still being used as BayesOpt Y."
 }
+if ([regex]::Matches($text, 'dt << Bring Window To Front;').Count -lt 4) {
+    throw "Runtime JSL validation failed: live table is not being foregrounded at all required stages."
+}
 
 [System.IO.File]::WriteAllText(
     $runtimeScript,
@@ -94,7 +106,7 @@ if ($text.Contains('Y( :Score )')) {
     (New-Object System.Text.UTF8Encoding($false))
 )
 
-Write-Host "" 
+Write-Host ""
 Write-Host "Launching DiscoveryPID JMP physical study" -ForegroundColor Cyan
 Write-Host "  Code branch : main"
 Write-Host "  Port        : $Port"
@@ -108,7 +120,7 @@ Write-Host "  Displacement: $($config.testOffsetDeg) deg"
 Write-Host "  Target      : <1.0 s, smooth stop"
 Write-Host "  Settle max  : $($config.maxSettlingTimeSeconds) s HARD CUTOFF"
 Write-Host "  Timeout row : Settling=$($config.dataPolicy.timeoutSettlingResponseSeconds) s + Return Failure=1"
-Write-Host "  Live table  : visible and brought to front after every run" -ForegroundColor Green
+Write-Host "  Live table  : kept visible/foregrounded through the study" -ForegroundColor Green
 Write-Host "  Runtime JSL : $runtimeScript"
 Write-Host ""
 
