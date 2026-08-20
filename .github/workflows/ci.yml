@@ -105,9 +105,11 @@ jobs:
           assert 'MULTI-RESPONSE desirability' in launcher
           assert 'diagnostic/setup ranking only; NOT a BayesOpt Y' in launcher
           assert 'Timeout row :' in launcher
-          assert 'Live table  : visible and brought to front after every run' in launcher
+          assert 'Live table  : kept visible/foregrounded through the study' in launcher
           assert 'If( Is Missing( resultList[2] ), resultList[2] = maxSettlingTimeSeconds );' in launcher
           assert 'kpHigh = 30.0;' in launcher
+          assert 'expected one timeout-censor insertion point' in launcher
+          assert 'live table is not being foregrounded at all required stages' in launcher
           PY
 
       - name: Build and inspect JMP runtime
