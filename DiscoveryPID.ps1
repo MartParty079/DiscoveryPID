@@ -135,11 +135,13 @@ function Start-Test {
     $defaultKi = [double]$project.defaultPID.ki
     $defaultKd = [double]$project.defaultPID.kd
     $minimumDrivePWM = [double]$project.minimumDrivePWM
+    $maxSettlingTimeSeconds = [double]$project.maxSettlingTimeSeconds
 
     Write-Host ""
     Write-Host "TEST mode - exact PID manual return check" -ForegroundColor Cyan
     Write-Host "Set the PID, let the motor coast, move the mechanism by hand, then release it to HOME."
     Write-Host "TEST mode does NOT round PID values to the JMP grid." -ForegroundColor Green
+    Write-Host ("Hard return cutoff: {0:g} s" -f $maxSettlingTimeSeconds)
     Write-Host "Start with the mechanism physically at the intended HOME position."
     Write-Host ""
 
@@ -154,6 +156,7 @@ function Start-Test {
     Write-Host ("  Kd = {0:R}" -f $kd)
     Write-Host "  No JMP/grid quantization"
     Write-Host "  Motor will coast while you manually displace it"
+    Write-Host ("  Hard cutoff = {0:g} s" -f $maxSettlingTimeSeconds)
     Write-Host ""
 
     $py = Get-Python
@@ -168,7 +171,8 @@ function Start-Test {
         --ki $ki `
         --kd $kd `
         --minimum-drive-pwm $minimumDrivePWM `
-        --return-max-pwm 225
+        --return-max-pwm 225 `
+        --settle-timeout $maxSettlingTimeSeconds
 
     if ($LASTEXITCODE -ne 0) {
         throw "Manual return check exited with code $LASTEXITCODE."
@@ -185,6 +189,7 @@ function Start-Manual {
     $setupKp = [double]$project.defaultPID.kp
     $setupKi = [double]$project.defaultPID.ki
     $setupKd = [double]$project.defaultPID.kd
+    $maxSettlingTimeSeconds = [double]$project.maxSettlingTimeSeconds
 
     Write-Host ""
     Write-Host "MANUAL PID mode" -ForegroundColor Cyan
@@ -205,7 +210,7 @@ function Start-Manual {
     Write-Host ("  Kd = {0:F3}" -f $kd)
     Write-Host ("  Setup PID = {0:F3} / {1:F3} / {2:F3}" -f $setupKp, $setupKi, $setupKd)
     Write-Host "  Displacement = 300 deg"
-    Write-Host "  Settling max = 3.0 s HARD CUTOFF"
+    Write-Host ("  Settling max = {0:g} s HARD CUTOFF" -f $maxSettlingTimeSeconds)
     Write-Host "  PWM floor = $minimumDrivePWM (tapers near home)"
     Write-Host "  Controller = 100 Hz active-brake direct PID"
     Write-Host ""
@@ -237,7 +242,7 @@ function Start-Manual {
         --test-offset 300 `
         --return-max-pwm 225 `
         --home-padding-pulses 8 `
-        --max-settling-seconds 3 `
+        --max-settling-seconds $maxSettlingTimeSeconds `
         --minimum-drive-pwm $minimumDrivePWM `
         --setup-kp $setupKp `
         --setup-ki $setupKi `
@@ -272,10 +277,12 @@ DiscoveryPID modes
       Enter an exact PID with NO host-side rounding.
       The motor coasts while you manually displace the mechanism.
       Press Enter to release it and observe the PID return to HOME.
+      The return ends after $($project.maxSettlingTimeSeconds) seconds if it has not settled.
 
   .\DiscoveryPID.ps1 jmp
       Launch the current JMP Bayesian study.
       JMP PID values use the configured $($project.pidCoefficientStep) grid.
+      Each return has a hard $($project.maxSettlingTimeSeconds)-second settling deadline.
 
   .\DiscoveryPID.ps1 manual
       Prompt for return Kp/Ki/Kd and run one automated 300-degree physical trial.
@@ -297,6 +304,7 @@ function Show-Menu {
         Write-Host "PID limits: Kp <= $($project.pidRanges.kp[1]), Ki <= $($project.pidRanges.ki[1]), Kd <= $($project.pidRanges.kd[1])"
         Write-Host "TEST PID: exact value entered (no host rounding)" -ForegroundColor Green
         Write-Host "JMP/automated PID grid: nearest $($project.pidCoefficientStep)"
+        Write-Host "Return cutoff: $($project.maxSettlingTimeSeconds) s"
         Write-Host "PWM floor: $($project.minimumDrivePWM)"
         Write-Host ""
         Write-Host "[1] HOME   - recalibrate / set zero"
