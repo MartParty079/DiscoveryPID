@@ -35,6 +35,29 @@ def jsl_path(path: Path) -> str:
     return path.resolve().as_posix()
 
 
+def jsl_number(value: float | int) -> str:
+    return f"{float(value):g}"
+
+
+def response_limit_block(response: dict[str, object]) -> str:
+    if str(response.get("goal", "")).lower() != "minimize":
+        raise RuntimeError(f"Only minimize response goals are supported: {response}")
+
+    name = str(response["name"])
+    lower_x, lower_d = response["lower"]  # type: ignore[misc]
+    middle_x, middle_d = response["middle"]  # type: ignore[misc]
+    upper_x, upper_d = response["upper"]  # type: ignore[misc]
+    importance = response["importance"]
+
+    return f'''    Column( dt, "{name}" ) << Set Property(
+        "Response Limits",
+        {{Lower( {jsl_number(lower_x)}, {jsl_number(lower_d)} ),
+         Middle( {jsl_number(middle_x)}, {jsl_number(middle_d)} ),
+         Upper( {jsl_number(upper_x)}, {jsl_number(upper_d)} ),
+         Goal( Minimize ), Importance( {jsl_number(importance)} ), Show Limits( 1 )}}
+    );'''
+
+
 def main() -> int:
     a = args()
     repo = a.repo.resolve()
@@ -49,6 +72,14 @@ def main() -> int:
     max_settle = float(config["maxSettlingTimeSeconds"])
     study_name = config["studyName"]
     data_root_name = config["dataRoot"]
+    bo_config = config["bayesianOptimization"]
+    minimum_rsquare = float(bo_config["minimumRSquare"])
+    responses = bo_config["responses"]
+    transforms = config["dataPolicy"]["responseTransforms"]
+    chatter_cap = float(transforms["pwmChatter"]["cap"])
+    overshoot_cap = float(transforms["overshootDeg"]["cap"])
+    entry_rpm_cap = float(transforms["homeEntryRpm"]["cap"])
+    oscillation_cap = float(transforms["oscillations"]["cap"])
 
     # Machine-specific paths / identity.
     text = regex_required(
@@ -108,7 +139,7 @@ def main() -> int:
         "seed design",
     )
 
-    # Add physical smoothness/failure responses to the live table.
+    # Add bounded Bayesian responses plus raw diagnostics to the live table.
     old_columns = '''        New Column(
             "Oscillations",
             Numeric,
@@ -133,6 +164,13 @@ def main() -> int:
         ),
 
         New Column(
+            "Raw PWM Chatter",
+            Numeric,
+            Continuous,
+            Format( "Fixed Dec", 12, 6 )
+        ),
+
+        New Column(
             "Home Entry RPM",
             Numeric,
             Continuous,
@@ -144,6 +182,13 @@ def main() -> int:
             Numeric,
             Continuous,
             Format( "Best", 12 )
+        ),
+
+        New Column(
+            "Raw Overshoot (deg)",
+            Numeric,
+            Continuous,
+            Format( "Fixed Dec", 12, 6 )
         ),
 
         New Column(
@@ -163,46 +208,20 @@ def main() -> int:
 
     dt;
 );'''
-    new_limits = '''    // Score remains a diagnostic/setup-ranking value only.
+
+    response_blocks = "\n".join(response_limit_block(response) for response in responses)
+    new_limits = f'''    // Score remains a diagnostic/setup-ranking value only.
     Column( dt, "Score" ) <<
         Set Property(
             "Response Limits",
-            {Goal( Minimize ), Importance( 1 ), Show Limits( 0 )}
+            {{Goal( Minimize ), Importance( 1 ), Show Limits( 0 )}}
         );
 
     // MULTI-RESPONSE BAYESOPT DESIRABILITY.
-    // Lower is better for every response. A 3-second non-return is exported as
-    // Settling Time=3.0 and Return Failure=1, so no BayesOpt Y is left blank.
-    Column( dt, "Return Failure" ) << Set Property(
-        "Response Limits",
-        {Lower( 0.0, 1.0 ), Middle( 0.5, 0.15 ), Upper( 1.0, 0.0 ),
-         Goal( Minimize ), Importance( 6 ), Show Limits( 1 )}
-    );
-    Column( dt, "Settling Time (s)" ) << Set Property(
-        "Response Limits",
-        {Lower( 0.60, 1.0 ), Middle( 1.00, 0.85 ), Upper( 3.00, 0.0 ),
-         Goal( Minimize ), Importance( 5 ), Show Limits( 1 )}
-    );
-    Column( dt, "PWM Chatter" ) << Set Property(
-        "Response Limits",
-        {Lower( 0.0, 1.0 ), Middle( 0.5, 0.85 ), Upper( 2.5, 0.0 ),
-         Goal( Minimize ), Importance( 5 ), Show Limits( 1 )}
-    );
-    Column( dt, "Home Entry RPM" ) << Set Property(
-        "Response Limits",
-        {Lower( 0.0, 1.0 ), Middle( 2.0, 0.85 ), Upper( 10.0, 0.0 ),
-         Goal( Minimize ), Importance( 5 ), Show Limits( 1 )}
-    );
-    Column( dt, "Overshoot (deg)" ) << Set Property(
-        "Response Limits",
-        {Lower( 0.0, 1.0 ), Middle( 1.0, 0.75 ), Upper( 5.0, 0.0 ),
-         Goal( Minimize ), Importance( 3 ), Show Limits( 1 )}
-    );
-    Column( dt, "Oscillations" ) << Set Property(
-        "Response Limits",
-        {Lower( 0.0, 1.0 ), Middle( 1.0, 0.10 ), Upper( 2.0, 0.0 ),
-         Goal( Minimize ), Importance( 5 ), Show Limits( 1 )}
-    );
+    // v48 deliberately bounds every modeled response so a single violent or
+    // failed trial cannot dominate a Gaussian process. Raw chatter/overshoot
+    // remain available as diagnostics and in the per-run worker CSV.
+{response_blocks}
 
     dt;
 );'''
@@ -211,15 +230,17 @@ def main() -> int:
     text = replace_required(
         text,
         '            "Score,Settling Time (s),Overshoot (deg),Oscillations,IAE (deg*s)," ||',
-        '            "Score,Settling Time (s),Overshoot (deg),Oscillations,PWM Chatter,Home Entry RPM,Return Failure,IAE (deg*s)," ||',
+        '            "Score,Settling Time (s),Overshoot (deg),Raw Overshoot (deg),Oscillations,PWM Chatter,Raw PWM Chatter,Home Entry RPM,Return Failure,IAE (deg*s)," ||',
         "compact CSV header",
     )
     text = replace_required(
         text,
         '''                Char( Column( dt, "Oscillations" )[rowIndex] ) || "," ||
                 Char( Column( dt, "IAE (deg*s)" )[rowIndex] ) || "," ||''',
-        '''                Char( Column( dt, "Oscillations" )[rowIndex] ) || "," ||
+        '''                Char( Column( dt, "Raw Overshoot (deg)" )[rowIndex] ) || "," ||
+                Char( Column( dt, "Oscillations" )[rowIndex] ) || "," ||
                 Char( Column( dt, "PWM Chatter" )[rowIndex] ) || "," ||
+                Char( Column( dt, "Raw PWM Chatter" )[rowIndex] ) || "," ||
                 Char( Column( dt, "Home Entry RPM" )[rowIndex] ) || "," ||
                 Char( Column( dt, "Return Failure" )[rowIndex] ) || "," ||
                 Char( Column( dt, "IAE (deg*s)" )[rowIndex] ) || "," ||''',
@@ -259,10 +280,19 @@ def main() -> int:
     Column( dt, "Status" )[rowIndex] = resultList[12];
 
     saveSnapshot( dt );'''
-    new_save = '''    Column( dt, "Overshoot (deg)" )[rowIndex] = resultList[4];
-    Column( dt, "Oscillations" )[rowIndex] = resultList[5];
-    Column( dt, "PWM Chatter" )[rowIndex] = resultList[6];
-    Column( dt, "Home Entry RPM" )[rowIndex] = resultList[7];
+    new_save = f'''    // Preserve raw diagnostics, but feed bounded/conditioned responses to
+    // Bayesian Optimization. This prevents the 280-deg overshoot and 1000+
+    // chatter outliers seen in v47 from overwhelming their GP models.
+    Column( dt, "Raw Overshoot (deg)" )[rowIndex] = resultList[4];
+    Column( dt, "Overshoot (deg)" )[rowIndex] =
+        Min( {overshoot_cap:g}, Max( 0.0, resultList[4] ) );
+    Column( dt, "Oscillations" )[rowIndex] =
+        Min( {oscillation_cap:g}, Max( 0.0, resultList[5] ) );
+    Column( dt, "Raw PWM Chatter" )[rowIndex] = resultList[6];
+    Column( dt, "PWM Chatter" )[rowIndex] =
+        Min( {chatter_cap:g}, Log( 1 + Max( 0.0, resultList[6] ) ) );
+    Column( dt, "Home Entry RPM" )[rowIndex] =
+        Min( {entry_rpm_cap:g}, Max( 0.0, resultList[7] ) );
     Column( dt, "IAE (deg*s)" )[rowIndex] = resultList[8];
     Column( dt, "Peak Output RPM" )[rowIndex] = resultList[9];
     Column( dt, "Final Error (deg)" )[rowIndex] = resultList[10];
@@ -273,7 +303,7 @@ def main() -> int:
     saveSnapshot( dt );
     // Keep the live optimization table visible between every physical run.
     dt << Bring Window To Front;'''
-    text = replace_required(text, old_save, new_save, "save multi-response metrics")
+    text = replace_required(text, old_save, new_save, "save conditioned multi-response metrics")
 
     multi_y = '''                Y(
                     :Name( "Return Failure" ),
@@ -284,6 +314,16 @@ def main() -> int:
                     :Oscillations
                 ),'''
     text = replace_required(text, '                Y( :Score ),', multi_y, "multi-response BayesOpt Y")
+
+    # Let JMP exploit moderately predictive models instead of forcing most
+    # post-seed runs into MaxPro space filling. v47 used 0.50 and almost every
+    # response except Return Failure fell below that threshold.
+    text = replace_required(
+        text,
+        '                    Minimum RSquare( 0.50 )',
+        f'                    Minimum RSquare( {minimum_rsquare:.2f} )',
+        "BayesOpt minimum R-square",
+    )
 
     # Quantize every physically tested gain to the 0.5 grid.
     text = replace_required(
@@ -319,18 +359,18 @@ def main() -> int:
         "CONTROL_ERROR continuation",
     )
 
-    # Startup window explicitly states that this is multi-response optimization.
+    # Startup window explicitly states the active multi-response design.
     text = replace_required(
         text,
         '                "Study: " ||\n                studyName ||\n                "\\!NSession: " || sessionName ||\n                "\\!N\\!N" ||',
-        '                "Study: " ||\n                studyName ||\n                "\\!NSession: " || sessionName ||\n                "\\!NBayesOpt mode: MULTI-RESPONSE DESIRABILITY\\!N" ||\n                "Responses: failure, settling, chatter, home-entry RPM, overshoot, oscillations\\!N\\!N" ||',
+        '                "Study: " ||\n                studyName ||\n                "\\!NSession: " || sessionName ||\n                "\\!NBayesOpt mode: MULTI-RESPONSE DESIRABILITY\\!N" ||\n                "Responses: failure, settling, bounded chatter, home-entry RPM, bounded overshoot, oscillations\\!N" ||\n                "v48 response shaping: bounded/log-compressed for GP stability\\!N\\!N" ||',
         "startup multi-response banner",
     )
     text = replace_required(
         text,
         '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\\!N" ||',
-        f'                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s HARD CUTOFF\\!N" ||\n                "Timeout settling response: {max_settle:.1f} s (censored), Return Failure=1\\!N" ||',
-        "startup timeout description",
+        f'                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s HARD CUTOFF\\!N" ||\n                "Timeout settling response: {max_settle:.1f} s (censored), Return Failure=1\\!N" ||\n                "BayesOpt model gate: minimum R-square {minimum_rsquare:.2f}\\!N" ||',
+        "startup timeout/model description",
     )
 
     # Keep the data table present from the moment the session starts.
@@ -348,13 +388,21 @@ def main() -> int:
     required = [
         study_name,
         f"kpHigh = {kp_high:.1f};",
+        f"kiHigh = {ki_high:.1f};",
+        f"kdHigh = {kd_high:.1f};",
+        f"Minimum RSquare( {minimum_rsquare:.2f} )",
         "MULTI-RESPONSE BAYESOPT DESIRABILITY",
+        "v48 response shaping: bounded/log-compressed for GP stability",
         ':Name( "Return Failure" )',
         ':Name( "Settling Time (s)" )',
         ':Name( "PWM Chatter" )',
         ':Name( "Home Entry RPM" )',
         ':Name( "Overshoot (deg)" )',
         ':Oscillations',
+        'Column( dt, "Raw PWM Chatter" )[rowIndex]',
+        'Column( dt, "Raw Overshoot (deg)" )[rowIndex]',
+        f'Min( {chatter_cap:g}, Log( 1 + Max( 0.0, resultList[6] ) ) )',
+        f'Min( {overshoot_cap:g}, Max( 0.0, resultList[4] ) )',
         'Column( dt, "Return Failure" )[rowIndex]',
         'dt << Bring Window To Front;',
         '"--max-settling-seconds", Char( maxSettlingTimeSeconds )',
@@ -368,10 +416,12 @@ def main() -> int:
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(text, encoding="utf-8", newline="\n")
     print(f"Built validated runtime JSL: {a.output}")
-    print("BayesOpt: MULTI-RESPONSE desirability")
+    print("BayesOpt: MULTI-RESPONSE desirability with bounded/log-compressed responses")
     print("Responses: Return Failure, Settling Time, PWM Chatter, Home Entry RPM, Overshoot, Oscillations")
     print(f"PID range: Kp {kp_low:g}-{kp_high:g}, Ki {ki_low:g}-{ki_high:g}, Kd {kd_low:g}-{kd_high:g}")
+    print(f"BayesOpt minimum R-square: {minimum_rsquare:.2f}")
     print(f"Settling timeout: {max_settle:.1f} s; timeout rows export Settling Time={max_settle:.1f} and Return Failure=1")
+    print(f"Response caps: chatter={chatter_cap:g}, overshoot={overshoot_cap:g} deg, entryRPM={entry_rpm_cap:g}, oscillations={oscillation_cap:g}")
     return 0
 
 
