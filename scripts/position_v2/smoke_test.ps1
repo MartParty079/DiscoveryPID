@@ -8,6 +8,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$config = Get-Content (Join-Path $repo "config\discoverypid.json") -Raw | ConvertFrom-Json
+$minimumDrivePWM = [double]$config.minimumDrivePWM
 $py = Join-Path $env:USERPROFILE ".platformio\penv\Scripts\python.exe"
 
 if (-not (Test-Path $py)) { throw "PlatformIO Python not found: $py" }
@@ -25,7 +27,7 @@ New-Item -ItemType Directory -Force $dir | Out-Null
     --test-offset $TestOffsetDeg `
     --return-max-pwm 225 `
     --home-padding-pulses 2 `
-    --minimum-drive-pwm 60 `
+    --minimum-drive-pwm $minimumDrivePWM `
     --setup-kp $Kp `
     --setup-ki $Ki `
     --setup-kd $Kd `
