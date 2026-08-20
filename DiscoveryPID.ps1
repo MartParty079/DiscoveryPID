@@ -121,6 +121,7 @@ function Start-Manual {
     $kp = Read-PidValue "Kp" ([double]$project.pidRanges.kp[0]) ([double]$project.pidRanges.kp[1])
     $ki = Read-PidValue "Ki" ([double]$project.pidRanges.ki[0]) ([double]$project.pidRanges.ki[1])
     $kd = Read-PidValue "Kd" ([double]$project.pidRanges.kd[0]) ([double]$project.pidRanges.kd[1])
+    $minimumDrivePWM = [double]$project.minimumDrivePWM
 
     Write-Host ""
     Write-Host "Exact PID to run:" -ForegroundColor Yellow
@@ -129,6 +130,8 @@ function Start-Manual {
     Write-Host ("  Kd = {0:F1}" -f $kd)
     Write-Host "  Displacement = 300 deg"
     Write-Host "  Settling max = 3.0 s HARD CUTOFF"
+    Write-Host "  PWM floor = $minimumDrivePWM (tapers near home)"
+    Write-Host "  Controller = 100 Hz active-brake direct PID"
     Write-Host ""
 
     $confirm = Read-Host "Run this physical trial? [Y/n]"
@@ -159,7 +162,7 @@ function Start-Manual {
         --return-max-pwm 225 `
         --home-padding-pulses 2 `
         --max-settling-seconds 3 `
-        --minimum-drive-pwm 60 `
+        --minimum-drive-pwm $minimumDrivePWM `
         --setup-kp $kp `
         --setup-ki $ki `
         --setup-kd $kd `
@@ -213,6 +216,7 @@ function Show-Menu {
         Write-Host $project.profileName -ForegroundColor DarkCyan
         Write-Host "Port: $($script:ActivePort)"
         Write-Host "PID limits: Kp <= $($project.pidRanges.kp[1]), Ki <= $($project.pidRanges.ki[1]), Kd <= $($project.pidRanges.kd[1])"
+        Write-Host "PWM floor: $($project.minimumDrivePWM)"
         Write-Host ""
         Write-Host "[1] HOME   - recalibrate / set zero"
         Write-Host "[2] TEST   - fixed baseline 300-degree physical test"
