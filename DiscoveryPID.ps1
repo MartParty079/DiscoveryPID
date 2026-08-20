@@ -112,15 +112,15 @@ function Start-Jmp {
 }
 
 function Start-Manual {
-    Write-Host "" 
+    Write-Host ""
     Write-Host "MANUAL PID mode" -ForegroundColor Cyan
     Write-Host "Enter one PID set for a single 300-degree physical trial."
     Write-Host "Values are rounded to the nearest 0.5 before running."
     Write-Host ""
 
-    $kp = Read-PidValue "Kp" 0.5 1000.0
-    $ki = Read-PidValue "Ki" 0.0 500.0
-    $kd = Read-PidValue "Kd" 0.0 200.0
+    $kp = Read-PidValue "Kp" ([double]$project.pidRanges.kp[0]) ([double]$project.pidRanges.kp[1])
+    $ki = Read-PidValue "Ki" ([double]$project.pidRanges.ki[0]) ([double]$project.pidRanges.ki[1])
+    $kd = Read-PidValue "Kd" ([double]$project.pidRanges.kd[0]) ([double]$project.pidRanges.kd[1])
 
     Write-Host ""
     Write-Host "Exact PID to run:" -ForegroundColor Yellow
@@ -128,7 +128,7 @@ function Start-Manual {
     Write-Host ("  Ki = {0:F1}" -f $ki)
     Write-Host ("  Kd = {0:F1}" -f $kd)
     Write-Host "  Displacement = 300 deg"
-    Write-Host "  Settling max = 3.0 s"
+    Write-Host "  Settling max = 3.0 s HARD CUTOFF"
     Write-Host ""
 
     $confirm = Read-Host "Run this physical trial? [Y/n]"
@@ -195,10 +195,11 @@ DiscoveryPID modes
 
   .\DiscoveryPID.ps1 jmp
       Launch the current JMP Bayesian study.
+      Current PID limits come from config/discoverypid.json.
 
   .\DiscoveryPID.ps1 manual
       Prompt for Kp/Ki/Kd and run one physical trial.
-      PID values are rounded to the nearest 0.5.
+      PID values are rounded to the nearest 0.5 and use configured limits.
 
 Run .\DiscoveryPID.ps1 with no command for the four-option menu.
 Optional port override: .\DiscoveryPID.ps1 manual -Port COM8
@@ -211,6 +212,7 @@ function Show-Menu {
         Write-Host "DiscoveryPID" -ForegroundColor Cyan
         Write-Host $project.profileName -ForegroundColor DarkCyan
         Write-Host "Port: $($script:ActivePort)"
+        Write-Host "PID limits: Kp <= $($project.pidRanges.kp[1]), Ki <= $($project.pidRanges.ki[1]), Kd <= $($project.pidRanges.kd[1])"
         Write-Host ""
         Write-Host "[1] HOME   - recalibrate / set zero"
         Write-Host "[2] TEST   - fixed baseline 300-degree physical test"
