@@ -20,13 +20,14 @@ if (-not (Test-Path $py)) {
     $py = $command.Source
 }
 
-$studyName = "PositionStudy_DirectPID_v41_300Deg_MainRebuild"
-$sessionDir = Join-Path $repo "data\position_autotune_directpid_v41_mainrebuild\sessions"
+$studyName = "PositionStudy_DirectPID_v42_FastSmooth_300Deg"
+$sessionDir = Join-Path $repo "data\position_autotune_directpid_v42_fastsmooth\sessions"
 New-Item -ItemType Directory -Force $sessionDir | Out-Null
 
 # Create a machine-specific runtime copy. Physical-control logic remains in the
-# tracked Python worker; this copy only injects paths/port and snaps JMP's table
-# values to the 0.5 PID grid so the recorded factors equal what the motor runs.
+# tracked Python worker; this copy only injects paths/port, the current seed
+# design, and snaps JMP's table values to the 0.5 PID grid so the recorded
+# factors equal what the motor actually runs.
 $runtimeScript = Join-Path $env:TEMP "DiscoveryPID_Position_V2_runtime.jsl"
 $text = Get-Content $sourceScript -Raw
 $repoJsl = ($repo -replace '\\', '/') + '/'
@@ -64,7 +65,32 @@ $text = $text.Replace(
 )
 $text = $text.Replace(
     'data/position_autotune_directpid_v39_300deg10xrange_3s',
-    'data/position_autotune_directpid_v41_mainrebuild'
+    'data/position_autotune_directpid_v42_fastsmooth'
+)
+
+# Progressive seed design. The first points are intentionally conservative and
+# should establish usable physical responses. The later points progressively
+# increase authority and are allowed to be aggressive so Bayesian optimization
+# sees the transition from slow/stable to fast/potentially underdamped.
+$seedBlock = @'
+seedSettings = {
+    {0.5,    0.0,  0.5},
+    {1.0,    0.0,  0.5},
+    {2.0,    0.0,  0.5},
+    {5.0,    0.0,  1.0},
+    {10.0,   0.0,  1.0},
+    {20.0,   0.5,  2.0},
+    {40.0,   1.0,  3.0},
+    {80.0,   2.0,  5.0},
+    {160.0,  4.0,  8.0},
+    {320.0,  8.0, 12.0}
+};
+'@
+$text = [regex]::Replace(
+    $text,
+    '(?s)seedSettings\s*=\s*\{.*?\n\};',
+    $seedBlock.TrimEnd(),
+    1
 )
 
 # Quantize both initial seeds and Bayesian proposals to the nearest 0.5.
@@ -102,7 +128,7 @@ $text = $text.Replace(
 
 $text = $text.Replace(
     '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\!N" ||',
-    '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\!N" || "PID coefficient increment: 0.5\!N" ||'
+    '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\!N" || "Target response: under 1.0 s with a smooth home entry\!N" || "PID coefficient increment: 0.5\!N" ||'
 )
 
 # A failed physical run is an invalid penalty row, not a reason to kill the
@@ -118,7 +144,7 @@ $text = [regex]::Replace(
 $text = $text.Replace('    "\!\"" || Char( value ) || "\!\""', '    "\!"" || Char( value ) || "\!""')
 
 # Refuse to launch a partially patched runtime script. This keeps JMP from
-# silently optimizing without the physical worker connected.
+# silently optimizing without the physical worker connected or with stale seeds.
 if ($text -notmatch [regex]::Escape($workerJsl)) {
     throw "Runtime JSL validation failed: physical worker path was not injected."
 }
@@ -131,6 +157,9 @@ if ($text -match 'Throw\( statusText \)') {
 if ($text -notmatch [regex]::Escape($studyName)) {
     throw "Runtime JSL validation failed: current study identity missing."
 }
+if ($text -notmatch '\{0\.5,\s+0\.0,\s+0\.5\}' -or $text -notmatch '\{320\.0,\s+8\.0,\s+12\.0\}') {
+    throw "Runtime JSL validation failed: fast/smooth progressive seed design missing."
+}
 
 [System.IO.File]::WriteAllText(
     $runtimeScript,
@@ -142,8 +171,10 @@ Write-Host "Launching DiscoveryPID JMP physical study" -ForegroundColor Cyan
 Write-Host "  Code branch : main"
 Write-Host "  Port        : $Port"
 Write-Host "  Worker      : $workerScript"
+Write-Host "  Study       : $studyName"
 Write-Host "  PID step    : 0.5"
 Write-Host "  Displacement: 300 deg"
+Write-Host "  Target      : <1.0 s, smooth stop"
 Write-Host "  Settle max  : 3.0 s"
 Write-Host "  ACK retries : 3"
 Write-Host "  Runtime JSL : $runtimeScript"
