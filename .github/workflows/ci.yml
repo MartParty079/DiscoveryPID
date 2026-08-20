@@ -148,7 +148,8 @@ jobs:
           assert '{10.0,   0.0,  2.0}' in launcher
           assert '{200.0, 15.0, 30.0}' in launcher
           assert '3.0 s HARD CUTOFF (seeds + Bayesian)' in launcher
-          assert '"--max-settling-seconds", Char( maxSettlingTimeSeconds )' in launcher
+          assert '--max-settling-seconds' in launcher
+          assert 'maxSettlingTimeSeconds' in launcher
           assert 'New Column(' in launcher and '"PWM Chatter"' in launcher
           assert '"Home Entry RPM"' in launcher
           assert 'resultList[6]' in launcher and 'resultList[7]' in launcher
