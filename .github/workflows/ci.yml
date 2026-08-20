@@ -51,7 +51,7 @@ jobs:
             }
           }
 
-      - name: Check v45 configuration
+      - name: Check v46 active-brake configuration
         run: |
           python - <<'PY'
           import json
@@ -60,12 +60,16 @@ jobs:
           cfg = json.loads(Path('config/discoverypid.json').read_text())
           terminal = Path('DiscoveryPID.ps1').read_text()
           launcher = Path('scripts/position_v2/open_jmp.ps1').read_text()
+          control_test = Path('scripts/position_v2/control_test.ps1').read_text()
           worker = Path('tools/run_position_trial.py').read_text()
+          fw = Path('src/main.cpp').read_text()
 
           assert cfg['latestBranch'] == 'main'
-          assert cfg['studyName'] == 'PositionStudy_DirectPID_v45_MultiResponseVisible_300Deg'
-          assert cfg['dataRoot'] == 'position_autotune_directpid_v45_multiresponse_visible'
+          assert cfg['studyName'] == 'PositionStudy_DirectPID_v46_ActiveBrakeMultiResponse_300Deg'
+          assert cfg['dataRoot'] == 'position_autotune_directpid_v46_active_brake_multiresponse'
+          assert cfg['firmwareId'] == 'DiscoveryPID direct-position-pid-v3.6-active-brake 2026-08-20'
           assert cfg['testOffsetDeg'] == 300.0
+          assert cfg['minimumDrivePWM'] == 80.0
           assert cfg['pidRanges']['kp'] == [0.5, 30.0]
           assert cfg['pidRanges']['ki'] == [0.0, 100.0]
           assert cfg['pidRanges']['kd'] == [0.0, 50.0]
@@ -93,13 +97,38 @@ jobs:
           assert policy['timeoutRowsEligibleAsBestSetup'] is False
           assert policy['recoveryMotionIncludedInScoring'] is False
 
+          smoothing = cfg['returnSmoothing']
+          assert smoothing['activeBraking'] is True
+          assert smoothing['zeroCommandHardwareBrake'] is True
+          assert smoothing['activeBrakeReleaseRpm'] == 0.35
+          assert smoothing['coastBeforeReverse'] is False
+          assert smoothing['controlLoopHz'] == 100
+
+          assert 'EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.6-active-brake"' in worker
+          assert 'default=80.0' in worker
           assert 'status = "TEST_SETTLING_TIMEOUT"' in worker
           assert 'now - return_start >= a.max_settling_seconds' in worker
 
-          # Manual mode gets the same Kp/Ki/Kd limits from config.
+          # Active-brake firmware must apply PID output directly, support the
+          # DRV8871 brake state, and contain no old coast-before-reverse call.
+          assert 'direct-position-pid-v3.6-active-brake' in fw
+          assert 'float minimumDrivePWM = 80.0f;' in fw
+          assert 'CONTROL_INTERVAL_MS = 10' in fw
+          assert 'void setMotorBrake()' in fw
+          assert 'digitalWrite(MOTOR_IN1_PIN, HIGH);' in fw
+          assert 'digitalWrite(MOTOR_IN2_PIN, HIGH);' in fw
+          assert 'void applyClosedLoopMotorCommand(float desiredCommand)' in fw
+          assert 'applyClosedLoopMotorCommand(desiredPWM);' in fw
+          assert 'applyReversalInterlock' not in fw
+          assert 'coast to nearly zero before reversing' not in fw
+          assert 'Brake=' in fw
+
+          # Manual/Test paths use the same configured floor.
           assert 'Read-PidValue "Kp" ([double]$project.pidRanges.kp[0]) ([double]$project.pidRanges.kp[1])' in terminal
-          assert 'Read-PidValue "Ki" ([double]$project.pidRanges.ki[0]) ([double]$project.pidRanges.ki[1])' in terminal
-          assert 'Read-PidValue "Kd" ([double]$project.pidRanges.kd[0]) ([double]$project.pidRanges.kd[1])' in terminal
+          assert '$minimumDrivePWM = [double]$project.minimumDrivePWM' in terminal
+          assert '--minimum-drive-pwm $minimumDrivePWM' in terminal
+          assert '$minimumDrivePWM = [double]$config.minimumDrivePWM' in control_test
+          assert '--minimum-drive-pwm $minimumDrivePWM' in control_test
 
           # Launcher must clearly advertise and validate the executed design.
           assert 'MULTI-RESPONSE desirability' in launcher
@@ -108,6 +137,9 @@ jobs:
           assert 'Live table  : kept visible/foregrounded through the study' in launcher
           assert 'If( Is Missing( resultList[2] ), resultList[2] = maxSettlingTimeSeconds );' in launcher
           assert 'kpHigh = 30.0;' in launcher
+          assert '$minimumDrivePWM = [double]$config.minimumDrivePWM' in launcher
+          assert '$minimumDriveLiteral' in launcher
+          assert 'Controller  : 100 Hz PID + immediate reverse-torque active braking' in launcher
           assert 'expected one timeout-censor insertion point' in launcher
           assert 'live table is not being foregrounded at all required stages' in launcher
           PY
@@ -124,7 +156,7 @@ jobs:
           from pathlib import Path
           text = Path('/tmp/DiscoveryPID_runtime.jsl').read_text()
 
-          assert 'PositionStudy_DirectPID_v45_MultiResponseVisible_300Deg' in text
+          assert 'PositionStudy_DirectPID_v46_ActiveBrakeMultiResponse_300Deg' in text
           assert 'kpHigh = 30.0;' in text
           assert 'kiHigh = 100.0;' in text
           assert 'kdHigh = 50.0;' in text
