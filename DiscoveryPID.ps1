@@ -63,8 +63,17 @@ function Get-Python {
     throw "Python was not found."
 }
 
-function Round-Half([double]$Value) {
-    return [Math]::Floor(($Value * 2.0) + 0.5) / 2.0
+function Round-PidValue([double]$Value) {
+    $step = [double]$project.pidCoefficientStep
+    if ($step -le 0) {
+        throw "pidCoefficientStep must be greater than zero."
+    }
+
+    return [Math]::Round(
+        $Value / $step,
+        0,
+        [MidpointRounding]::AwayFromZero
+    ) * $step
 }
 
 function Read-PidValue([string]$Name, [double]$Minimum, [double]$Maximum) {
@@ -82,7 +91,7 @@ function Read-PidValue([string]$Name, [double]$Minimum, [double]$Maximum) {
             continue
         }
 
-        return Round-Half $value
+        return Round-PidValue $value
     }
 }
 
@@ -112,10 +121,12 @@ function Start-Jmp {
 }
 
 function Start-Manual {
+    $pidStep = [double]$project.pidCoefficientStep
+
     Write-Host ""
     Write-Host "MANUAL PID mode" -ForegroundColor Cyan
     Write-Host "Enter one PID set for a single 300-degree physical trial."
-    Write-Host "Values are rounded to the nearest 0.5 before running."
+    Write-Host "Values are rounded to the nearest $pidStep before running."
     Write-Host ""
 
     $kp = Read-PidValue "Kp" ([double]$project.pidRanges.kp[0]) ([double]$project.pidRanges.kp[1])
@@ -125,9 +136,9 @@ function Start-Manual {
 
     Write-Host ""
     Write-Host "Exact PID to run:" -ForegroundColor Yellow
-    Write-Host ("  Kp = {0:F1}" -f $kp)
-    Write-Host ("  Ki = {0:F1}" -f $ki)
-    Write-Host ("  Kd = {0:F1}" -f $kd)
+    Write-Host ("  Kp = {0:F3}" -f $kp)
+    Write-Host ("  Ki = {0:F3}" -f $ki)
+    Write-Host ("  Kd = {0:F3}" -f $kd)
     Write-Host "  Displacement = 300 deg"
     Write-Host "  Settling max = 3.0 s HARD CUTOFF"
     Write-Host "  PWM floor = $minimumDrivePWM (tapers near home)"
@@ -198,11 +209,11 @@ DiscoveryPID modes
 
   .\DiscoveryPID.ps1 jmp
       Launch the current JMP Bayesian study.
-      Current PID limits come from config/discoverypid.json.
+      Current PID limits and rounding come from config/discoverypid.json.
 
   .\DiscoveryPID.ps1 manual
       Prompt for Kp/Ki/Kd and run one physical trial.
-      PID values are rounded to the nearest 0.5 and use configured limits.
+      PID values are rounded to the nearest $($project.pidCoefficientStep) and use configured limits.
 
 Run .\DiscoveryPID.ps1 with no command for the four-option menu.
 Optional port override: .\DiscoveryPID.ps1 manual -Port COM8
@@ -216,6 +227,7 @@ function Show-Menu {
         Write-Host $project.profileName -ForegroundColor DarkCyan
         Write-Host "Port: $($script:ActivePort)"
         Write-Host "PID limits: Kp <= $($project.pidRanges.kp[1]), Ki <= $($project.pidRanges.ki[1]), Kd <= $($project.pidRanges.kd[1])"
+        Write-Host "PID rounding: nearest $($project.pidCoefficientStep)"
         Write-Host "PWM floor: $($project.minimumDrivePWM)"
         Write-Host ""
         Write-Host "[1] HOME   - recalibrate / set zero"

@@ -19,6 +19,9 @@ $minimumRSquare = [double]$config.bayesianOptimization.minimumRSquare
 $missingEntryRpm = [double]$config.dataPolicy.missingHomeEntryRpmResponse
 $catastrophicOvershootDeg = [double]$config.dataPolicy.catastrophicOvershootDeg
 $pidStep = [double]$config.pidCoefficientStep
+if ($pidStep -le 0) { throw "pidCoefficientStep must be greater than zero." }
+$pidStepLiteral = $pidStep.ToString("0.###############", [Globalization.CultureInfo]::InvariantCulture)
+$pidStepRegex = [regex]::Escape($pidStepLiteral)
 $chatterCap = [double]$config.dataPolicy.responseTransforms.pwmChatter.cap
 $overshootCap = [double]$config.dataPolicy.responseTransforms.overshootDeg.cap
 $entryRpmCap = [double]$config.dataPolicy.responseTransforms.homeEntryRpm.cap
@@ -111,15 +114,17 @@ $qualityReplacement = @'
 '@
 $text = [regex]::Replace($text, $qualityPattern, $qualityReplacement, 1)
 
-# JMP can intentionally request a replicate. After 0.5-step quantization,
-# replace an already-tested proposal with the nearest untested grid point.
-$duplicatePattern = '(?m)^\s*proposedKd = Round\( Column\( dt, "KD" \)\[newRow\] \* 2 \) / 2;\r?\n\s*Column\( dt, "KP" \)\[newRow\] = proposedKp;\r?\n\s*Column\( dt, "KI" \)\[newRow\] = proposedKi;\r?\n\s*Column\( dt, "KD" \)\[newRow\] = proposedKd;'
+# JMP can intentionally request a replicate. With 0.001-resolution gains the
+# design space is far too large for an exhaustive grid scan, so a duplicate is
+# replaced by the nearest available axial neighbor on the configured grid.
+$duplicatePatternTemplate = '(?m)^\s*proposedKd = Round\( Column\( dt, "KD" \)\[newRow\] / {0} \) \* {0};\r?\n\s*Column\( dt, "KP" \)\[newRow\] = proposedKp;\r?\n\s*Column\( dt, "KI" \)\[newRow\] = proposedKi;\r?\n\s*Column\( dt, "KD" \)\[newRow\] = proposedKd;'
+$duplicatePattern = $duplicatePatternTemplate -f $pidStepRegex
 $duplicateMatches = [regex]::Matches($text, $duplicatePattern)
 if ($duplicateMatches.Count -ne 1) {
-    throw "Runtime JSL validation failed: expected one quantized Bayesian proposal block, found $($duplicateMatches.Count)."
+    throw "Runtime JSL validation failed: expected one $pidStepLiteral-quantized Bayesian proposal block, found $($duplicateMatches.Count)."
 }
-$duplicateReplacement = @'
-        proposedKd = Round( Column( dt, "KD" )[newRow] * 2 ) / 2;
+$duplicateReplacement = @"
+        proposedKd = Round( Column( dt, "KD" )[newRow] / $pidStepLiteral ) * $pidStepLiteral;
 
         originalProposedKp = proposedKp;
         originalProposedKi = proposedKi;
@@ -129,55 +134,92 @@ $duplicateReplacement = @'
             combinationAlreadyCompleted( dt, proposedKp, proposedKi, proposedKd ),
 
             nearestFound = 0;
-            nearestDistance = 1e99;
             nearestKp = .;
             nearestKi = .;
             nearestKd = .;
 
+            // Search outward in $pidStepLiteral increments. Only six axial
+            // neighbors are checked at each radius, so 0.001 resolution stays fast.
             For(
-                candidateKp = kpLow,
-                candidateKp <= kpHigh + 0.000001,
-                candidateKp += 0.5,
+                neighborRadius = 1,
+                neighborRadius <= 1000 & !nearestFound,
+                neighborRadius++,
 
-                For(
-                    candidateKi = kiLow,
-                    candidateKi <= kiHigh + 0.000001,
-                    candidateKi += 0.5,
+                neighborOffset = neighborRadius * $pidStepLiteral;
 
-                    For(
-                        candidateKd = kdLow,
-                        candidateKd <= kdHigh + 0.000001,
-                        candidateKd += 0.5,
+                candidateKp = originalProposedKp + neighborOffset;
+                If(
+                    !nearestFound &
+                    candidateKp <= kpHigh + 0.0000001 &
+                    !combinationAlreadyCompleted( dt, candidateKp, originalProposedKi, originalProposedKd ),
+                    nearestFound = 1;
+                    nearestKp = candidateKp;
+                    nearestKi = originalProposedKi;
+                    nearestKd = originalProposedKd;
+                );
 
-                        candidateDistance =
-                            ((candidateKp - originalProposedKp) / Max( 0.5, kpHigh - kpLow )) ^ 2 +
-                            ((candidateKi - originalProposedKi) / Max( 0.5, kiHigh - kiLow )) ^ 2 +
-                            ((candidateKd - originalProposedKd) / Max( 0.5, kdHigh - kdLow )) ^ 2;
+                candidateKp = originalProposedKp - neighborOffset;
+                If(
+                    !nearestFound &
+                    candidateKp >= kpLow - 0.0000001 &
+                    !combinationAlreadyCompleted( dt, candidateKp, originalProposedKi, originalProposedKd ),
+                    nearestFound = 1;
+                    nearestKp = candidateKp;
+                    nearestKi = originalProposedKi;
+                    nearestKd = originalProposedKd;
+                );
 
-                        If(
-                            !combinationAlreadyCompleted(
-                                dt,
-                                candidateKp,
-                                candidateKi,
-                                candidateKd
-                            ) & candidateDistance < nearestDistance,
+                candidateKi = originalProposedKi + neighborOffset;
+                If(
+                    !nearestFound &
+                    candidateKi <= kiHigh + 0.0000001 &
+                    !combinationAlreadyCompleted( dt, originalProposedKp, candidateKi, originalProposedKd ),
+                    nearestFound = 1;
+                    nearestKp = originalProposedKp;
+                    nearestKi = candidateKi;
+                    nearestKd = originalProposedKd;
+                );
 
-                            nearestFound = 1;
-                            nearestDistance = candidateDistance;
-                            nearestKp = candidateKp;
-                            nearestKi = candidateKi;
-                            nearestKd = candidateKd;
-                        );
-                    );
+                candidateKi = originalProposedKi - neighborOffset;
+                If(
+                    !nearestFound &
+                    candidateKi >= kiLow - 0.0000001 &
+                    !combinationAlreadyCompleted( dt, originalProposedKp, candidateKi, originalProposedKd ),
+                    nearestFound = 1;
+                    nearestKp = originalProposedKp;
+                    nearestKi = candidateKi;
+                    nearestKd = originalProposedKd;
+                );
+
+                candidateKd = originalProposedKd + neighborOffset;
+                If(
+                    !nearestFound &
+                    candidateKd <= kdHigh + 0.0000001 &
+                    !combinationAlreadyCompleted( dt, originalProposedKp, originalProposedKi, candidateKd ),
+                    nearestFound = 1;
+                    nearestKp = originalProposedKp;
+                    nearestKi = originalProposedKi;
+                    nearestKd = candidateKd;
+                );
+
+                candidateKd = originalProposedKd - neighborOffset;
+                If(
+                    !nearestFound &
+                    candidateKd >= kdLow - 0.0000001 &
+                    !combinationAlreadyCompleted( dt, originalProposedKp, originalProposedKi, candidateKd ),
+                    nearestFound = 1;
+                    nearestKp = originalProposedKp;
+                    nearestKi = originalProposedKi;
+                    nearestKd = candidateKd;
                 );
             );
 
             If(
                 nearestFound,
 
-                proposedKp = nearestKp;
-                proposedKi = nearestKi;
-                proposedKd = nearestKd;
+                proposedKp = Round( nearestKp / $pidStepLiteral ) * $pidStepLiteral;
+                proposedKi = Round( nearestKi / $pidStepLiteral ) * $pidStepLiteral;
+                proposedKd = Round( nearestKd / $pidStepLiteral ) * $pidStepLiteral;
 
                 Print(
                     "BAYESIAN DUPLICATE REPLACED: (" ||
@@ -192,7 +234,7 @@ $duplicateReplacement = @'
                 dt << Delete Rows( newRow );
                 saveSnapshot( dt );
                 stopRequested = 1;
-                stopReason = "All focused 0.5-grid PID combinations have already been tested.";
+                stopReason = "No untested $pidStepLiteral-grid neighbor found within 1000 steps of the proposed PID.";
                 Break();
             );
         );
@@ -200,7 +242,7 @@ $duplicateReplacement = @'
         Column( dt, "KP" )[newRow] = proposedKp;
         Column( dt, "KI" )[newRow] = proposedKi;
         Column( dt, "KD" )[newRow] = proposedKd;
-'@
+"@
 $text = [regex]::Replace($text, $duplicatePattern, $duplicateReplacement, 1)
 
 # Keep the live data grid in the foreground before each physical run as well as
@@ -215,6 +257,7 @@ $text = $text.Replace(
 )
 
 $minimumRSquareLiteral = ("Minimum RSquare( {0:F2} )" -f $minimumRSquare)
+$pidQuantizationLiteral = "proposedKd = Round( Column( dt, `"KD`" )[newRow] / $pidStepLiteral ) * $pidStepLiteral;"
 $required = @(
     'MULTI-RESPONSE BAYESOPT DESIRABILITY',
     'BayesOpt mode: MULTI-RESPONSE DESIRABILITY',
@@ -236,6 +279,7 @@ $required = @(
     $minimumRSquareLiteral,
     $minimumDriveLiteral,
     $overshootLiteral,
+    $pidQuantizationLiteral,
     'If( Is Missing( resultList[2] ), resultList[2] = maxSettlingTimeSeconds );',
     'qualityStatus = "EXCESSIVE_OVERSHOOT";',
     'BAYESIAN DUPLICATE REPLACED',
@@ -269,11 +313,11 @@ Write-Host "  BayesOpt    : MULTI-RESPONSE desirability" -ForegroundColor Yellow
 Write-Host "  Responses   : failure | settling | bounded chatter | entry RPM | bounded overshoot | OSCILLATION COUNT" -ForegroundColor Yellow
 Write-Host "  Conditioning: chatter=ln(1+raw) capped $chatterCap | overshoot cap $overshootCap deg | entry cap $entryRpmCap RPM | oscillation count cap $oscillationCap" -ForegroundColor Green
 Write-Host "  Failure     : timeout/error OR raw overshoot > $catastrophicOvershootDeg deg"
-Write-Host "  Duplicates  : rounded PID repeats replaced by nearest untested $pidStep-grid point" -ForegroundColor Green
+Write-Host "  Duplicates  : rounded PID repeats replaced by nearest untested $pidStepLiteral-grid neighbor" -ForegroundColor Green
 Write-Host "  Model gate  : minimum R-square $minimumRSquare"
 Write-Host "  Score       : diagnostic/setup ranking only; NOT a BayesOpt Y"
 Write-Host "  PID range   : Kp $($config.pidRanges.kp[0])-$($config.pidRanges.kp[1]) | Ki $($config.pidRanges.ki[0])-$($config.pidRanges.ki[1]) | Kd $($config.pidRanges.kd[0])-$($config.pidRanges.kd[1])"
-Write-Host "  PID step    : $pidStep"
+Write-Host "  PID step    : $pidStepLiteral (nearest 0.001)" -ForegroundColor Green
 Write-Host "  PWM floor   : $minimumDrivePWM; taper $taperStartDeg deg -> $taperEndDeg deg, then floor=0" -ForegroundColor Green
 Write-Host "  Integral    : enabled only inside +/-$integralBandDeg deg; contribution limited to +/-$integralMaxPWM PWM" -ForegroundColor Green
 Write-Host "  Controller  : 100 Hz pure signed PID; reverse PWM is PID braking; zero PWM coasts" -ForegroundColor Green

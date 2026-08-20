@@ -70,6 +70,10 @@ def main() -> int:
     ki_low, ki_high = config["pidRanges"]["ki"]
     kd_low, kd_high = config["pidRanges"]["kd"]
     max_settle = float(config["maxSettlingTimeSeconds"])
+    pid_step = float(config["pidCoefficientStep"])
+    if pid_step <= 0.0:
+        raise RuntimeError("pidCoefficientStep must be greater than zero")
+    pid_step_jsl = jsl_number(pid_step)
     study_name = config["studyName"]
     data_root_name = config["dataRoot"]
     bo_config = config["bayesianOptimization"]
@@ -130,7 +134,9 @@ def main() -> int:
     seed_lines = ["seedSettings = {"]
     for index, (kp, ki, kd) in enumerate(config["seedSettings"]):
         comma = "," if index < len(config["seedSettings"]) - 1 else ""
-        seed_lines.append(f"    {{{kp:.1f}, {ki:.1f}, {kd:.1f}}}{comma}")
+        seed_lines.append(
+            f"    {{{jsl_number(kp)}, {jsl_number(ki)}, {jsl_number(kd)}}}{comma}"
+        )
     seed_lines.append("};")
     text = regex_required(
         text,
@@ -325,29 +331,51 @@ def main() -> int:
         "BayesOpt minimum R-square",
     )
 
-    # Quantize every physically tested gain to the 0.5 grid.
+    # Quantize every physically tested gain to the configured PID step.
+    seed_kp_quant = f'        seedKp = Round( seedSettings[seedIndex][1] / {pid_step_jsl} ) * {pid_step_jsl};'
+    seed_ki_quant = f'        seedKi = Round( seedSettings[seedIndex][2] / {pid_step_jsl} ) * {pid_step_jsl};'
+    seed_kd_quant = f'        seedKd = Round( seedSettings[seedIndex][3] / {pid_step_jsl} ) * {pid_step_jsl};'
+    proposed_kp_quant = f'        proposedKp = Round( Column( dt, "KP" )[newRow] / {pid_step_jsl} ) * {pid_step_jsl};'
+    proposed_ki_quant = f'        proposedKi = Round( Column( dt, "KI" )[newRow] / {pid_step_jsl} ) * {pid_step_jsl};'
+    proposed_kd_quant = f'''        proposedKd = Round( Column( dt, "KD" )[newRow] / {pid_step_jsl} ) * {pid_step_jsl};
+        Column( dt, "KP" )[newRow] = proposedKp;
+        Column( dt, "KI" )[newRow] = proposedKi;
+        Column( dt, "KD" )[newRow] = proposedKd;'''
+
     text = replace_required(
-        text, '        seedKp = seedSettings[seedIndex][1];',
-        '        seedKp = Round( seedSettings[seedIndex][1] * 2 ) / 2;', "seed Kp quantization")
+        text,
+        '        seedKp = seedSettings[seedIndex][1];',
+        seed_kp_quant,
+        "seed Kp quantization",
+    )
     text = replace_required(
-        text, '        seedKi = seedSettings[seedIndex][2];',
-        '        seedKi = Round( seedSettings[seedIndex][2] * 2 ) / 2;', "seed Ki quantization")
+        text,
+        '        seedKi = seedSettings[seedIndex][2];',
+        seed_ki_quant,
+        "seed Ki quantization",
+    )
     text = replace_required(
-        text, '        seedKd = seedSettings[seedIndex][3];',
-        '        seedKd = Round( seedSettings[seedIndex][3] * 2 ) / 2;', "seed Kd quantization")
+        text,
+        '        seedKd = seedSettings[seedIndex][3];',
+        seed_kd_quant,
+        "seed Kd quantization",
+    )
     text = replace_required(
-        text, '        proposedKp = Column( dt, "KP" )[newRow];',
-        '        proposedKp = Round( Column( dt, "KP" )[newRow] * 2 ) / 2;', "Bayesian Kp quantization")
+        text,
+        '        proposedKp = Column( dt, "KP" )[newRow];',
+        proposed_kp_quant,
+        "Bayesian Kp quantization",
+    )
     text = replace_required(
-        text, '        proposedKi = Column( dt, "KI" )[newRow];',
-        '        proposedKi = Round( Column( dt, "KI" )[newRow] * 2 ) / 2;', "Bayesian Ki quantization")
+        text,
+        '        proposedKi = Column( dt, "KI" )[newRow];',
+        proposed_ki_quant,
+        "Bayesian Ki quantization",
+    )
     text = replace_required(
         text,
         '        proposedKd = Column( dt, "KD" )[newRow];',
-        '''        proposedKd = Round( Column( dt, "KD" )[newRow] * 2 ) / 2;
-        Column( dt, "KP" )[newRow] = proposedKp;
-        Column( dt, "KI" )[newRow] = proposedKi;
-        Column( dt, "KD" )[newRow] = proposedKd;''',
+        proposed_kd_quant,
         "Bayesian Kd quantization",
     )
 
@@ -369,7 +397,7 @@ def main() -> int:
     text = replace_required(
         text,
         '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\\!N" ||',
-        f'                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s HARD CUTOFF\\!N" ||\n                "Timeout settling response: {max_settle:.1f} s (censored), Return Failure=1\\!N" ||\n                "BayesOpt model gate: minimum R-square {minimum_rsquare:.2f}\\!N" ||',
+        f'                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s HARD CUTOFF\\!N" ||\n                "Timeout settling response: {max_settle:.1f} s (censored), Return Failure=1\\!N" ||\n                "BayesOpt model gate: minimum R-square {minimum_rsquare:.2f}\\!N" ||\n                "PID coefficient rounding: nearest {pid_step_jsl}\\!N" ||',
         "startup timeout/model description",
     )
 
@@ -406,6 +434,9 @@ def main() -> int:
         'Column( dt, "Return Failure" )[rowIndex]',
         'dt << Bring Window To Front;',
         '"--max-settling-seconds", Char( maxSettlingTimeSeconds )',
+        proposed_kp_quant.strip(),
+        proposed_ki_quant.strip(),
+        f'proposedKd = Round( Column( dt, "KD" )[newRow] / {pid_step_jsl} ) * {pid_step_jsl};',
     ]
     missing = [token for token in required if token not in text]
     if missing:
@@ -419,6 +450,7 @@ def main() -> int:
     print("BayesOpt: MULTI-RESPONSE desirability with bounded/log-compressed responses")
     print("Responses: Return Failure, Settling Time, PWM Chatter, Home Entry RPM, Overshoot, Oscillations")
     print(f"PID range: Kp {kp_low:g}-{kp_high:g}, Ki {ki_low:g}-{ki_high:g}, Kd {kd_low:g}-{kd_high:g}")
+    print(f"PID coefficient rounding: nearest {pid_step:g}")
     print(f"BayesOpt minimum R-square: {minimum_rsquare:.2f}")
     print(f"Settling timeout: {max_settle:.1f} s; timeout rows export Settling Time={max_settle:.1f} and Return Failure=1")
     print(f"Response caps: chatter={chatter_cap:g}, overshoot={overshoot_cap:g} deg, entryRPM={entry_rpm_cap:g}, oscillations={oscillation_cap:g}")

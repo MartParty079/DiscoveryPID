@@ -1,5 +1,5 @@
 {
-  "profileName": "Direct pure bidirectional PID / v50 final-approach smoothing / focused multi-response BayesOpt / duplicate-free 0.5 grid / 300-degree / 3s cutoff",
+  "profileName": "Direct pure bidirectional PID / v50 final-approach smoothing / focused multi-response BayesOpt / duplicate-free 0.001 grid / 300-degree / 3s cutoff",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
@@ -109,7 +109,7 @@
     "catastrophicOvershootRowsEligibleAsBestSetup": false,
     "recoveryMotionIncludedInScoring": false,
     "newSessionPerLaunch": true,
-    "duplicateRoundedPidPolicy": "replace with nearest untested 0.5-grid point using normalized PID-space distance",
+    "duplicateRoundedPidPolicy": "replace an already-tested rounded PID with the nearest untested 0.001-grid neighbor",
     "returnFailureResponse": "0 only for COMPLETE with raw overshoot <= catastrophicOvershootDeg; otherwise 1",
     "timeoutSettlingResponseSeconds": 3.0,
     "missingHomeEntryRpmResponse": 10.0,
