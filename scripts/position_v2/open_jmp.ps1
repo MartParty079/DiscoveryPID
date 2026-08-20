@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $configPath = Join-Path $repo "config\discoverypid.json"
 $builder = Join-Path $repo "tools\build_jmp_runtime.py"
-$worker = Join-Path $repo "tools\run_position_trial.py"
+$worker = Join-Path $repo "tools\run_position_trial_configured.py"
 $template = Join-Path $repo "jmp\DiscoveryPID_Position_V2.jsl"
 
 foreach ($path in @($configPath, $builder, $worker, $template)) {
@@ -139,7 +139,7 @@ $duplicateReplacement = @"
             nearestKd = .;
 
             // Search outward in $pidStepLiteral increments. Only six axial
-            // neighbors are checked at each radius, so 0.001 resolution stays fast.
+            // neighbors are checked at each radius, so fine resolution stays fast.
             For(
                 neighborRadius = 1,
                 neighborRadius <= 1000 & !nearestFound,
@@ -258,6 +258,14 @@ $text = $text.Replace(
 
 $minimumRSquareLiteral = ("Minimum RSquare( {0:F2} )" -f $minimumRSquare)
 $pidQuantizationLiteral = "proposedKd = Round( Column( dt, `"KD`" )[newRow] / $pidStepLiteral ) * $pidStepLiteral;"
+$kpLowLiteral = ("kpLow = {0:F1};" -f [double]$config.pidRanges.kp[0])
+$kpHighLiteral = ("kpHigh = {0:F1};" -f [double]$config.pidRanges.kp[1])
+$kiLowLiteral = ("kiLow = {0:F1};" -f [double]$config.pidRanges.ki[0])
+$kiHighLiteral = ("kiHigh = {0:F1};" -f [double]$config.pidRanges.ki[1])
+$kdLowLiteral = ("kdLow = {0:F1};" -f [double]$config.pidRanges.kd[0])
+$kdHighLiteral = ("kdHigh = {0:F1};" -f [double]$config.pidRanges.kd[1])
+$workerLiteral = $worker.Replace('\', '/')
+
 $required = @(
     'MULTI-RESPONSE BAYESOPT DESIRABILITY',
     'BayesOpt mode: MULTI-RESPONSE DESIRABILITY',
@@ -270,16 +278,17 @@ $required = @(
     ':Oscillations',
     'Raw PWM Chatter',
     'Raw Overshoot (deg)',
-    'kpLow = 20.0;',
-    'kpHigh = 26.0;',
-    'kiLow = 5.0;',
-    'kiHigh = 8.0;',
-    'kdLow = 0.5;',
-    'kdHigh = 4.0;',
+    $kpLowLiteral,
+    $kpHighLiteral,
+    $kiLowLiteral,
+    $kiHighLiteral,
+    $kdLowLiteral,
+    $kdHighLiteral,
     $minimumRSquareLiteral,
     $minimumDriveLiteral,
     $overshootLiteral,
     $pidQuantizationLiteral,
+    $workerLiteral,
     'If( Is Missing( resultList[2] ), resultList[2] = maxSettlingTimeSeconds );',
     'qualityStatus = "EXCESSIVE_OVERSHOOT";',
     'BAYESIAN DUPLICATE REPLACED',
@@ -317,7 +326,8 @@ Write-Host "  Duplicates  : rounded PID repeats replaced by nearest untested $pi
 Write-Host "  Model gate  : minimum R-square $minimumRSquare"
 Write-Host "  Score       : diagnostic/setup ranking only; NOT a BayesOpt Y"
 Write-Host "  PID range   : Kp $($config.pidRanges.kp[0])-$($config.pidRanges.kp[1]) | Ki $($config.pidRanges.ki[0])-$($config.pidRanges.ki[1]) | Kd $($config.pidRanges.kd[0])-$($config.pidRanges.kd[1])"
-Write-Host "  PID step    : $pidStepLiteral (nearest 0.001)" -ForegroundColor Green
+Write-Host "  PID step    : $pidStepLiteral (nearest $pidStepLiteral)" -ForegroundColor Green
+Write-Host "  Worker      : $worker" -ForegroundColor Green
 Write-Host "  PWM floor   : $minimumDrivePWM; taper $taperStartDeg deg -> $taperEndDeg deg, then floor=0" -ForegroundColor Green
 Write-Host "  Integral    : enabled only inside +/-$integralBandDeg deg; contribution limited to +/-$integralMaxPWM PWM" -ForegroundColor Green
 Write-Host "  Controller  : 100 Hz pure signed PID; reverse PWM is PID braking; zero PWM coasts" -ForegroundColor Green
