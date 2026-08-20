@@ -11,18 +11,21 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $config = Get-Content (Join-Path $repo "config\discoverypid.json") -Raw | ConvertFrom-Json
 $minimumDrivePWM = [double]$config.minimumDrivePWM
 $py = Join-Path $env:USERPROFILE ".platformio\penv\Scripts\python.exe"
+$worker = Join-Path $repo "tools\run_position_trial_configured.py"
 
 if (-not (Test-Path $py)) { throw "PlatformIO Python not found: $py" }
+if (-not (Test-Path $worker)) { throw "Configured PID worker not found: $worker" }
 
 Set-Location $repo
 $dir = ".\data\position_autotune_control_test"
 New-Item -ItemType Directory -Force $dir | Out-Null
 
-Write-Host "DirectPID physical control test" -ForegroundColor Cyan
+Write-Host "DirectPID automated physical control test" -ForegroundColor Cyan
 Write-Host "Expected: home -> $TestOffsetDeg deg -> candidate PID return home"
 Write-Host "Controller: 100 Hz active-brake direct PID | PWM floor: $minimumDrivePWM"
+Write-Host "PID quantization follows config/discoverypid.json; use DiscoveryPID.ps1 test for exact no-rounding manual displacement."
 
-& $py ".\tools\run_position_trial.py" `
+& $py $worker `
     --port $Port `
     --trial 1 `
     --kp $Kp `
