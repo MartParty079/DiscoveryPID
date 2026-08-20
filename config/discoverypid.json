@@ -1,74 +1,75 @@
 {
-  "profileName": "Direct pure bidirectional PID / 300-degree multi-response Bayesian study / 3s censored cutoff",
+  "profileName": "Direct pure bidirectional PID / cleaned bounded multi-response BayesOpt / 300-degree / 3s cutoff",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
   "firmwareId": "DiscoveryPID direct-position-pid-v3.7-pure-bidirectional 2026-08-20",
-  "studyName": "PositionStudy_DirectPID_v47_PureBidirectionalMultiResponse_300Deg",
-  "dataRoot": "position_autotune_directpid_v47_pure_bidirectional_multiresponse",
+  "studyName": "PositionStudy_DirectPID_v48_CleanResponses_300Deg",
+  "dataRoot": "position_autotune_directpid_v48_clean_responses",
   "testOffsetDeg": 300.0,
   "minimumDrivePWM": 80.0,
   "pidRanges": {
     "kp": [0.5, 30.0],
-    "ki": [0.0, 100.0],
-    "kd": [0.0, 50.0]
+    "ki": [0.0, 10.0],
+    "kd": [0.0, 30.0]
   },
   "maxSettlingTimeSeconds": 3.0,
   "pidCoefficientStep": 0.5,
   "serialAckRetries": 3,
   "bayesianOptimization": {
     "mode": "multiResponseDesirability",
+    "minimumRSquare": 0.10,
     "scalarScoreUsedAsBayesianResponse": false,
     "scalarScoreRetainedForDiagnosticsAndSetupSelection": true,
     "responses": [
       {
         "name": "Return Failure",
         "goal": "minimize",
-        "importance": 6.0,
+        "importance": 7.0,
         "lower": [0.0, 1.0],
-        "middle": [0.5, 0.15],
-        "upper": [1.0, 0.0]
+        "middle": [0.5, 0.20],
+        "upper": [1.0, 0.02]
       },
       {
         "name": "Settling Time (s)",
         "goal": "minimize",
-        "importance": 5.0,
-        "lower": [0.6, 1.0],
-        "middle": [1.0, 0.85],
-        "upper": [3.0, 0.0]
+        "importance": 6.0,
+        "lower": [0.60, 1.0],
+        "middle": [1.20, 0.75],
+        "upper": [3.0, 0.08]
       },
       {
         "name": "PWM Chatter",
         "goal": "minimize",
-        "importance": 5.0,
+        "importance": 6.0,
         "lower": [0.0, 1.0],
-        "middle": [0.5, 0.85],
-        "upper": [2.5, 0.0]
+        "middle": [1.0, 0.60],
+        "upper": [3.0, 0.08]
       },
       {
         "name": "Home Entry RPM",
         "goal": "minimize",
-        "importance": 5.0,
+        "importance": 4.0,
         "lower": [0.0, 1.0],
-        "middle": [2.0, 0.85],
-        "upper": [10.0, 0.0]
+        "middle": [4.0, 0.65],
+        "upper": [10.0, 0.08]
       },
       {
         "name": "Overshoot (deg)",
         "goal": "minimize",
-        "importance": 3.0,
+        "importance": 4.0,
         "lower": [0.0, 1.0],
-        "middle": [1.0, 0.75],
-        "upper": [5.0, 0.0]
+        "middle": [2.0, 0.65],
+        "upper": [10.0, 0.08]
       },
       {
         "name": "Oscillations",
         "goal": "minimize",
         "importance": 5.0,
         "lower": [0.0, 1.0],
-        "middle": [1.0, 0.10],
-        "upper": [2.0, 0.0]
+        "middle": [1.0, 0.45],
+        "upper": [3.0, 0.08]
       }
     ]
   },
@@ -89,15 +90,15 @@
   },
   "seedSettings": [
     [4.0, 0.0, 1.0],
-    [6.0, 0.0, 1.0],
-    [8.0, 0.0, 1.5],
-    [10.0, 0.0, 2.0],
-    [12.0, 0.5, 2.5],
-    [15.0, 1.0, 3.0],
-    [18.0, 2.0, 4.0],
-    [22.0, 4.0, 6.0],
-    [26.0, 8.0, 9.0],
-    [30.0, 15.0, 14.0]
+    [6.0, 0.0, 1.5],
+    [8.0, 0.5, 2.0],
+    [10.0, 0.0, 1.0],
+    [12.0, 2.0, 6.0],
+    [16.0, 1.0, 10.0],
+    [20.0, 4.0, 5.0],
+    [24.0, 3.0, 14.0],
+    [27.0, 7.0, 20.0],
+    [30.0, 10.0, 30.0]
   ],
   "dataPolicy": {
     "returnDeadlineSeconds": 3.0,
@@ -109,7 +110,26 @@
     "timeoutSettlingResponseSeconds": 3.0,
     "missingHomeEntryRpmResponse": 10.0,
     "multiResponseRowsRemainNumeric": true,
-    "liveJmpTableVisible": true
+    "liveJmpTableVisible": true,
+    "rawMetricsPreservedInRunCsv": true,
+    "responseTransforms": {
+      "pwmChatter": {
+        "method": "min(cap, ln(1 + max(0, raw)))",
+        "cap": 3.0
+      },
+      "overshootDeg": {
+        "method": "min(cap, max(0, raw))",
+        "cap": 10.0
+      },
+      "homeEntryRpm": {
+        "method": "min(cap, max(0, raw))",
+        "cap": 10.0
+      },
+      "oscillations": {
+        "method": "min(cap, max(0, raw))",
+        "cap": 3.0
+      }
+    }
   },
   "returnSmoothing": {
     "minimumPwmTaperStartDeg": 12.0,
