@@ -26,9 +26,6 @@ $sessionDir = Join-Path $repo ("data\{0}\sessions" -f [string]$config.dataRoot)
 New-Item -ItemType Directory -Force $sessionDir | Out-Null
 $runtimeScript = Join-Path $env:TEMP "DiscoveryPID_Position_V2_runtime.jsl"
 
-# Build the runtime JSL from config + the tracked template. The builder refuses
-# to emit a runtime if multi-response Y columns, response limits, PID ranges,
-# timeout handling, or live-table visibility are missing.
 & $py $builder `
     --repo $repo `
     --port $Port `
@@ -41,19 +38,12 @@ if ($LASTEXITCODE -ne 0) {
 
 $text = Get-Content $runtimeScript -Raw
 
-# Runtime uses the single project PWM-floor default. The tracked JSL template
-# intentionally remains generic/historical; this is the final machine-specific
-# file JMP actually executes.
 $minimumDriveLiteral = ("minimumDrivePWM = {0:F1};" -f $minimumDrivePWM)
 if (-not $text.Contains('minimumDrivePWM = 60.0;')) {
     throw "Runtime JSL validation failed: minimumDrivePWM template value missing."
 }
 $text = $text.Replace('minimumDrivePWM = 60.0;', $minimumDriveLiteral)
 
-# A 3-second timeout is a right-censored bad settling response, not an unknown
-# response. Keep every BayesOpt Y numeric while Return Failure explicitly marks
-# the run as invalid. Use a newline-agnostic regex so Windows Git/PowerShell line
-# endings cannot silently defeat this patch.
 $censorPattern = '(?m)^    Close\( resultDT, No Save \);\r?\n\r?\n    // ---------------------------------------------------------------\r?\n    // RELEASE-TO-HOME MEASUREMENT WARNING'
 $censorMatches = [regex]::Matches($text, $censorPattern)
 if ($censorMatches.Count -ne 1) {
@@ -72,9 +62,6 @@ $censorReplacement = @'
 '@
 $text = [regex]::Replace($text, $censorPattern, $censorReplacement, 1)
 
-# Keep the optimization table in front immediately before every physical run as
-# well as after each saved result. That way the live data grid remains the main
-# JMP window while Python owns the COM port.
 $text = $text.Replace(
     "            resultList =`n                runPhysicalTrial(",
     "            dt << Bring Window To Front;`n            resultList =`n                runPhysicalTrial("
@@ -84,7 +71,6 @@ $text = $text.Replace(
     "        dt << Bring Window To Front;`n        resultList =`n            runPhysicalTrial("
 )
 
-# Validate the final file that JMP will actually execute.
 $required = @(
     'MULTI-RESPONSE BAYESOPT DESIRABILITY',
     'BayesOpt mode: MULTI-RESPONSE DESIRABILITY',
@@ -128,7 +114,7 @@ Write-Host "  Score       : diagnostic/setup ranking only; NOT a BayesOpt Y"
 Write-Host "  PID range   : Kp $($config.pidRanges.kp[0])-$($config.pidRanges.kp[1]) | Ki $($config.pidRanges.ki[0])-$($config.pidRanges.ki[1]) | Kd $($config.pidRanges.kd[0])-$($config.pidRanges.kd[1])"
 Write-Host "  PID step    : $($config.pidCoefficientStep)"
 Write-Host "  PWM floor   : $minimumDrivePWM (tapers near home)"
-Write-Host "  Controller  : 100 Hz PID + immediate reverse-torque active braking" -ForegroundColor Green
+Write-Host "  Controller  : 100 Hz pure signed PID; reverse PWM is PID braking; zero PWM coasts" -ForegroundColor Green
 Write-Host "  Displacement: $($config.testOffsetDeg) deg"
 Write-Host "  Target      : <1.0 s, smooth stop"
 Write-Host "  Settle max  : $($config.maxSettlingTimeSeconds) s HARD CUTOFF"
