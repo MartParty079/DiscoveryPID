@@ -1,11 +1,11 @@
 {
-  "profileName": "Direct PID / 300-degree Bayesian study - smooth snap-home return / 3 s settling max / 0.5 PID steps",
+  "profileName": "Direct PID / 300-degree Bayesian study - sub-1s fast smooth stop objective / progressive seeds",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
   "firmwareId": "DiscoveryPID direct-position-pid-v3.5-smooth-return 2026-08-19",
-  "studyName": "PositionStudy_DirectPID_v41_300Deg_MainRebuild",
+  "studyName": "PositionStudy_DirectPID_v42_FastSmooth_300Deg",
   "testOffsetDeg": 300.0,
   "pidRanges": {
     "kp": [0.5, 1000.0],
@@ -15,14 +15,32 @@
   "maxSettlingTimeSeconds": 3.0,
   "pidCoefficientStep": 0.5,
   "serialAckRetries": 3,
-  "scoreWeights": {
-    "settlingTime": 2.0,
-    "overshoot": 1.0,
-    "oscillations": 0.5,
-    "pwmChatter": 4.0,
-    "iae": 0.01,
-    "finalError": 0.25
+  "scoreObjective": {
+    "settlingTargetSeconds": 1.0,
+    "speedLinearWeight": 4.0,
+    "lateQuadraticWeight": 20.0,
+    "pwmChatterWeight": 8.0,
+    "homeEntryRpmSquaredWeight": 0.15,
+    "overshootLinearWeight": 0.75,
+    "overshootSquaredWeight": 0.20,
+    "oscillationWeight": 5.0,
+    "iaeWeight": 0.003,
+    "finalErrorWeight": 0.20,
+    "timeoutPenalty": 25.0,
+    "abnormalPenalty": 500.0
   },
+  "seedSettings": [
+    [0.5, 0.0, 0.5],
+    [1.0, 0.0, 0.5],
+    [2.0, 0.0, 0.5],
+    [5.0, 0.0, 1.0],
+    [10.0, 0.0, 1.0],
+    [20.0, 0.5, 2.0],
+    [40.0, 1.0, 3.0],
+    [80.0, 2.0, 5.0],
+    [160.0, 4.0, 8.0],
+    [320.0, 8.0, 12.0]
+  ],
   "returnSmoothing": {
     "minimumPwmTaperStartDeg": 12.0,
     "minimumPwmTaperEndDeg": 1.0,
