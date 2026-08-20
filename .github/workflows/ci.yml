@@ -70,10 +70,31 @@ jobs:
           assert cfg['maxSettlingTimeSeconds'] == 3.0
           assert cfg['pidCoefficientStep'] == 0.5
           assert cfg['serialAckRetries'] == 3
-          assert cfg['studyName'] == 'PositionStudy_DirectPID_v43_CleanFastSmooth_300Deg'
+          assert cfg['studyName'] == 'PositionStudy_DirectPID_v44_MultiResponseFastSmooth_300Deg'
           assert cfg['firmwareId'] == 'DiscoveryPID direct-position-pid-v3.5-smooth-return 2026-08-19'
 
+          bo_cfg = cfg['bayesianOptimization']
+          assert bo_cfg['mode'] == 'multiResponseDesirability'
+          assert bo_cfg['scalarScoreUsedAsBayesianResponse'] is False
+          assert bo_cfg['scalarScoreRetainedForDiagnosticsAndSetupSelection'] is True
+          responses = {r['name']: r for r in bo_cfg['responses']}
+          assert set(responses) == {
+              'Return Failure', 'Settling Time (s)', 'PWM Chatter',
+              'Home Entry RPM', 'Overshoot (deg)', 'Oscillations'
+          }
+          assert responses['Return Failure']['importance'] == 6.0
+          assert responses['Return Failure']['lower'] == [0.0, 1.0]
+          assert responses['Return Failure']['upper'] == [1.0, 0.0]
+          assert responses['Settling Time (s)']['importance'] == 5.0
+          assert responses['Settling Time (s)']['middle'] == [1.0, 0.85]
+          assert responses['Settling Time (s)']['upper'] == [3.0, 0.0]
+          assert responses['PWM Chatter']['importance'] == 5.0
+          assert responses['Home Entry RPM']['importance'] == 5.0
+          assert responses['Overshoot (deg)']['importance'] == 3.0
+          assert responses['Oscillations']['importance'] == 5.0
+
           objective = cfg['scoreObjective']
+          assert objective['purpose'] == 'diagnostic ranking and best completed setup PID selection only'
           assert objective['settlingTargetSeconds'] == 1.0
           assert objective['speedLinearWeight'] == 4.0
           assert objective['lateQuadraticWeight'] == 20.0
@@ -95,6 +116,7 @@ jobs:
           assert policy['timeoutRowsEligibleAsBestSetup'] is False
           assert policy['recoveryMotionIncludedInScoring'] is False
           assert policy['newSessionPerLaunch'] is True
+          assert policy['undefinedPhysicalResponsesRemainMissing'] is True
 
           assert cfg['returnSmoothing']['minimumPwmTaperStartDeg'] == 12.0
           assert cfg['returnSmoothing']['minimumPwmTaperEndDeg'] == 1.0
@@ -131,16 +153,17 @@ jobs:
           assert 'tracking_score = 0.003 * iae + 0.20 * final_error' in py
 
           # The tracked JSL is a template. open_jmp.ps1 hard-patches the current
-          # study identity/ranges/seeds and validates them before JMP is opened.
+          # study identity/ranges/seeds/responses and validates them before JMP.
           assert 'studyName = "PositionStudy_DirectPID_v39_300Deg10xRange_3s";' in jsl
           assert 'maxSettlingTimeSeconds = 3.0;' in jsl
           assert 'testOffsetDeg = 300.0;' in jsl
+          assert 'Y( :Score )' in jsl
           assert 'EVENT TEST_RETURN' in jsl
           assert 'cmdExecutable' not in jsl
 
           assert 'tools\\run_position_trial.py' in launcher
           assert 'run_position_trial_halfstep.py' not in launcher
-          assert 'PositionStudy_DirectPID_v43_CleanFastSmooth_300Deg' in launcher
+          assert 'PositionStudy_DirectPID_v44_MultiResponseFastSmooth_300Deg' in launcher
           assert "kpHigh = 200.0;" in launcher
           assert "kiHigh = 100.0;" in launcher
           assert "kdHigh = 50.0;" in launcher
@@ -150,9 +173,21 @@ jobs:
           assert '3.0 s HARD CUTOFF (seeds + Bayesian)' in launcher
           assert '--max-settling-seconds' in launcher
           assert 'maxSettlingTimeSeconds' in launcher
-          assert 'New Column(' in launcher and '"PWM Chatter"' in launcher
+          assert '"PWM Chatter"' in launcher
           assert '"Home Entry RPM"' in launcher
-          assert 'resultList[6]' in launcher and 'resultList[7]' in launcher
+          assert '"Return Failure"' in launcher
+          assert 'If( resultList[12] == "COMPLETE", 0, 1 )' in launcher
+          assert ':Name( "Return Failure" )' in launcher
+          assert ':Name( "Settling Time (s)" )' in launcher
+          assert ':Name( "PWM Chatter" )' in launcher
+          assert ':Name( "Home Entry RPM" )' in launcher
+          assert ':Name( "Overshoot (deg)" )' in launcher
+          assert ':Oscillations' in launcher
+          assert 'Lower( 0.60, 1.0 )' in launcher
+          assert 'Middle( 1.00, 0.85 )' in launcher
+          assert 'Upper( 3.00, 0.0 )' in launcher
+          assert 'Importance( 6 )' in launcher
+          assert 'Score       : diagnostic/setup ranking only; NOT a BayesOpt Y' in launcher
           assert 'Runtime JSL validation failed' in launcher
           assert 'proposedKp = Round(' in launcher
 
