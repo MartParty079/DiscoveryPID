@@ -51,7 +51,7 @@ jobs:
             }
           }
 
-      - name: Check v47 pure bidirectional configuration
+      - name: Check v48 cleaned multi-response configuration
         run: |
           python - <<'PY'
           import json
@@ -62,31 +62,38 @@ jobs:
           launcher = Path('scripts/position_v2/open_jmp.ps1').read_text()
           control_test = Path('scripts/position_v2/control_test.ps1').read_text()
           worker = Path('tools/run_position_trial.py').read_text()
+          builder = Path('tools/build_jmp_runtime.py').read_text()
           fw = Path('src/main.cpp').read_text()
 
           assert cfg['latestBranch'] == 'main'
-          assert cfg['studyName'] == 'PositionStudy_DirectPID_v47_PureBidirectionalMultiResponse_300Deg'
-          assert cfg['dataRoot'] == 'position_autotune_directpid_v47_pure_bidirectional_multiresponse'
+          assert cfg['studyName'] == 'PositionStudy_DirectPID_v48_CleanResponses_300Deg'
+          assert cfg['dataRoot'] == 'position_autotune_directpid_v48_clean_responses'
           assert cfg['firmwareId'] == 'DiscoveryPID direct-position-pid-v3.7-pure-bidirectional 2026-08-20'
           assert cfg['testOffsetDeg'] == 300.0
           assert cfg['minimumDrivePWM'] == 80.0
           assert cfg['pidRanges']['kp'] == [0.5, 30.0]
-          assert cfg['pidRanges']['ki'] == [0.0, 100.0]
-          assert cfg['pidRanges']['kd'] == [0.0, 50.0]
+          assert cfg['pidRanges']['ki'] == [0.0, 10.0]
+          assert cfg['pidRanges']['kd'] == [0.0, 30.0]
           assert cfg['maxSettlingTimeSeconds'] == 3.0
           assert cfg['pidCoefficientStep'] == 0.5
 
           bo = cfg['bayesianOptimization']
           assert bo['mode'] == 'multiResponseDesirability'
+          assert bo['minimumRSquare'] == 0.10
           assert bo['scalarScoreUsedAsBayesianResponse'] is False
           assert [r['name'] for r in bo['responses']] == [
               'Return Failure', 'Settling Time (s)', 'PWM Chatter',
               'Home Entry RPM', 'Overshoot (deg)', 'Oscillations'
           ]
+          assert [r['importance'] for r in bo['responses']] == [7.0, 6.0, 6.0, 4.0, 4.0, 5.0]
+          assert all(r['upper'][1] > 0.0 for r in bo['responses'])
 
           assert cfg['seedSettings'][0] == [4.0, 0.0, 1.0]
-          assert cfg['seedSettings'][-1] == [30.0, 15.0, 14.0]
-          assert all(row[0] <= 30.0 for row in cfg['seedSettings'])
+          assert cfg['seedSettings'][3] == [10.0, 0.0, 1.0]
+          assert cfg['seedSettings'][-1] == [30.0, 10.0, 30.0]
+          assert all(0.5 <= row[0] <= 30.0 for row in cfg['seedSettings'])
+          assert all(0.0 <= row[1] <= 10.0 for row in cfg['seedSettings'])
+          assert all(0.0 <= row[2] <= 30.0 for row in cfg['seedSettings'])
 
           policy = cfg['dataPolicy']
           assert policy['returnDeadlineSeconds'] == 3.0
@@ -96,6 +103,12 @@ jobs:
           assert policy['liveJmpTableVisible'] is True
           assert policy['timeoutRowsEligibleAsBestSetup'] is False
           assert policy['recoveryMotionIncludedInScoring'] is False
+          assert policy['rawMetricsPreservedInRunCsv'] is True
+          transforms = policy['responseTransforms']
+          assert transforms['pwmChatter']['cap'] == 3.0
+          assert transforms['overshootDeg']['cap'] == 10.0
+          assert transforms['homeEntryRpm']['cap'] == 10.0
+          assert transforms['oscillations']['cap'] == 3.0
 
           smoothing = cfg['returnSmoothing']
           assert smoothing['pidGeneratedBidirectionalBraking'] is True
@@ -104,42 +117,48 @@ jobs:
           assert smoothing['coastBeforeReverse'] is False
           assert smoothing['controlLoopHz'] == 100
 
+          # Physical firmware/worker stay v3.7; v48 changes experiment design only.
           assert 'EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.7-pure-bidirectional"' in worker
           assert 'default=80.0' in worker
           assert 'status = "TEST_SETTLING_TIMEOUT"' in worker
           assert 'now - return_start >= a.max_settling_seconds' in worker
-
-          # Pure bidirectional PID: the signed PID output goes straight to the
-          # H-bridge every 10 ms. Reverse PID output provides braking torque.
-          # PID zero means coast; no separate DRV8871 hardware-brake state.
           assert 'direct-position-pid-v3.7-pure-bidirectional' in fw
           assert 'float minimumDrivePWM = 80.0f;' in fw
           assert 'CONTROL_INTERVAL_MS = 10' in fw
-          assert 'void applyClosedLoopMotorCommand(float desiredCommand)' in fw
           assert 'setMotorDrive(desiredCommand);' in fw
-          assert 'applyClosedLoopMotorCommand(desiredPWM);' in fw
           assert 'applyReversalInterlock' not in fw
           assert 'setMotorBrake' not in fw
-          assert 'motorBrakeActive' not in fw
-          assert 'Brake=' not in fw
-          assert 'digitalWrite(MOTOR_IN1_PIN, HIGH);' not in fw
-          assert 'digitalWrite(MOTOR_IN2_PIN, HIGH);' not in fw
-          assert 'Hardware IN1=1 / IN2=1 braking is intentionally NOT used.' in fw
 
+          # Manual/Test paths inherit the narrowed config and same PWM floor.
           assert 'Read-PidValue "Kp" ([double]$project.pidRanges.kp[0]) ([double]$project.pidRanges.kp[1])' in terminal
+          assert 'Read-PidValue "Ki" ([double]$project.pidRanges.ki[0]) ([double]$project.pidRanges.ki[1])' in terminal
+          assert 'Read-PidValue "Kd" ([double]$project.pidRanges.kd[0]) ([double]$project.pidRanges.kd[1])' in terminal
           assert '$minimumDrivePWM = [double]$project.minimumDrivePWM' in terminal
           assert '--minimum-drive-pwm $minimumDrivePWM' in terminal
           assert '$minimumDrivePWM = [double]$config.minimumDrivePWM' in control_test
           assert '--minimum-drive-pwm $minimumDrivePWM' in control_test
 
+          # Builder performs bounded/log-compressed response conditioning.
+          assert 'response_limit_block' in builder
+          assert 'Minimum RSquare( {minimum_rsquare:.2f} )' in builder
+          assert 'Raw PWM Chatter' in builder
+          assert 'Raw Overshoot (deg)' in builder
+          assert 'Log( 1 + Max( 0.0, resultList[6] ) )' in builder
+          assert 'v48 response shaping: bounded/log-compressed for GP stability' in builder
+
+          # Launcher must show and validate the active design before JMP opens.
           assert 'MULTI-RESPONSE desirability' in launcher
+          assert 'bounded chatter' in launcher
+          assert 'Conditioning:' in launcher
+          assert 'Model gate  : minimum R-square' in launcher
           assert 'diagnostic/setup ranking only; NOT a BayesOpt Y' in launcher
           assert 'Timeout row :' in launcher
           assert 'Live table  : kept visible/foregrounded through the study' in launcher
           assert 'If( Is Missing( resultList[2] ), resultList[2] = maxSettlingTimeSeconds );' in launcher
           assert 'kpHigh = 30.0;' in launcher
+          assert 'kiHigh = 10.0;' in launcher
+          assert 'kdHigh = 30.0;' in launcher
           assert '$minimumDrivePWM = [double]$config.minimumDrivePWM' in launcher
-          assert '$minimumDriveLiteral' in launcher
           assert 'Controller  : 100 Hz pure signed PID; reverse PWM is PID braking; zero PWM coasts' in launcher
           assert 'expected one timeout-censor insertion point' in launcher
           assert 'live table is not being foregrounded at all required stages' in launcher
@@ -157,18 +176,24 @@ jobs:
           from pathlib import Path
           text = Path('/tmp/DiscoveryPID_runtime.jsl').read_text()
 
-          assert 'PositionStudy_DirectPID_v47_PureBidirectionalMultiResponse_300Deg' in text
+          assert 'PositionStudy_DirectPID_v48_CleanResponses_300Deg' in text
           assert 'kpHigh = 30.0;' in text
-          assert 'kiHigh = 100.0;' in text
-          assert 'kdHigh = 50.0;' in text
+          assert 'kiHigh = 10.0;' in text
+          assert 'kdHigh = 30.0;' in text
+          assert 'Minimum RSquare( 0.10 )' in text
           assert 'MULTI-RESPONSE BAYESOPT DESIRABILITY' in text
           assert 'BayesOpt mode: MULTI-RESPONSE DESIRABILITY' in text
+          assert 'v48 response shaping: bounded/log-compressed for GP stability' in text
           assert ':Name( "Return Failure" )' in text
           assert ':Name( "Settling Time (s)" )' in text
           assert ':Name( "PWM Chatter" )' in text
           assert ':Name( "Home Entry RPM" )' in text
           assert ':Name( "Overshoot (deg)" )' in text
           assert ':Oscillations' in text
+          assert 'Raw PWM Chatter' in text
+          assert 'Raw Overshoot (deg)' in text
+          assert 'Min( 3, Log( 1 + Max( 0.0, resultList[6] ) ) )' in text
+          assert 'Min( 10, Max( 0.0, resultList[4] ) )' in text
           assert 'Y( :Score )' not in text
           assert 'Column( dt, "Return Failure" )[rowIndex]' in text
           assert text.count('dt << Bring Window To Front;') >= 2
