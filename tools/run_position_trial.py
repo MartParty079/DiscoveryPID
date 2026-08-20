@@ -14,7 +14,7 @@ from pathlib import Path
 import serial
 from serial import SerialException
 
-EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.5-smooth-return"
+EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.6-active-brake"
 SERIAL_FLOAT_TOL = 1e-3
 ACK_RETRIES = 3
 ACK_TIMEOUT_SECONDS = 2.0
@@ -67,7 +67,7 @@ def arguments() -> argparse.Namespace:
     p.add_argument("--success-final-error-deg", type=float, default=1.2)
     p.add_argument("--return-max-pwm", type=float, default=225.0)
     p.add_argument("--home-padding-pulses", type=int, default=2)
-    p.add_argument("--minimum-drive-pwm", type=float, default=60.0)
+    p.add_argument("--minimum-drive-pwm", type=float, default=80.0)
     p.add_argument("--setup-kp", type=float, required=True)
     p.add_argument("--setup-ki", type=float, required=True)
     p.add_argument("--setup-kd", type=float, required=True)
@@ -446,12 +446,6 @@ def write_result(
     late_seconds = max(0.0, settling_for_score - 1.0)
     entry_rpm_for_score = entry_rpm if entry_rpm is not None else 20.0
 
-    # Target-based objective for a genuinely tuned 300-degree return:
-    # - reward raw speed continuously;
-    # - strongly bend the cost upward after the 1.0 s target;
-    # - make command chatter and arriving at home too fast expensive;
-    # - make overshoot increasingly expensive instead of merely linear;
-    # - make every post-crossing oscillation expensive.
     speed_score = 4.0 * settling_for_score + 20.0 * late_seconds * late_seconds
     smoothness_score = 8.0 * chatter + 0.15 * entry_rpm_for_score * entry_rpm_for_score
     overshoot_score = 0.75 * overshoot + 0.20 * overshoot * overshoot
