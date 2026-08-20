@@ -8,14 +8,14 @@
   "studyName": "PositionStudy_DirectPID_v50_FinalApproachSmooth_300Deg",
   "dataRoot": "position_autotune_directpid_v50_final_approach_smooth",
   "testOffsetDeg": 300.0,
-  "minimumDrivePWM": 80.0,
+  "minimumDrivePWM": 0.0,
   "pidRanges": {
-    "kp": [20.0, 26.0],
-    "ki": [5.0, 8.0],
-    "kd": [0.5, 4.0]
+    "kp": [0.0, 50.0],
+    "ki": [0.0, 20.0],
+    "kd": [0.0, 20.0]
   },
   "maxSettlingTimeSeconds": 3.0,
-  "pidCoefficientStep": 0.5,
+  "pidCoefficientStep": 0.001,
   "serialAckRetries": 3,
   "bayesianOptimization": {
     "mode": "multiResponseDesirability",
