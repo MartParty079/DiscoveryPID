@@ -95,6 +95,35 @@ function Read-PidValue([string]$Name, [double]$Minimum, [double]$Maximum) {
     }
 }
 
+function Read-ExactPidValue(
+    [string]$Name,
+    [double]$Minimum,
+    [double]$Maximum,
+    [double]$Default
+) {
+    while ($true) {
+        $text = Read-Host ("{0} [{1} .. {2}] (Enter = {3})" -f $Name, $Minimum, $Maximum, $Default)
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            return $Default
+        }
+
+        $value = 0.0
+        if (-not [double]::TryParse($text, [ref]$value)) {
+            Write-Warning "Enter a number."
+            continue
+        }
+
+        if ($value -lt $Minimum -or $value -gt $Maximum) {
+            Write-Warning "$Name must be between $Minimum and $Maximum."
+            continue
+        }
+
+        # TEST mode intentionally returns the value exactly as entered. It does
+        # not use the JMP pidCoefficientStep grid or any legacy worker rounding.
+        return $value
+    }
+}
+
 function Start-Home {
     Write-Host "HOME mode - fresh calibration on $($script:ActivePort)" -ForegroundColor Cyan
     & (Join-Path $repo "scripts\position_v2\home.ps1") -Port $script:ActivePort
@@ -102,21 +131,48 @@ function Start-Home {
 }
 
 function Start-Test {
-    $kp = [double]$project.defaultPID.kp
-    $ki = [double]$project.defaultPID.ki
-    $kd = [double]$project.defaultPID.kd
+    $defaultKp = [double]$project.defaultPID.kp
+    $defaultKi = [double]$project.defaultPID.ki
+    $defaultKd = [double]$project.defaultPID.kd
+    $minimumDrivePWM = [double]$project.minimumDrivePWM
 
-    Write-Host "TEST mode" -ForegroundColor Cyan
-    Write-Host ("Default baseline: Kp={0:F3} Ki={1:F3} Kd={2:F3}, displacement=300 deg" -f $kp, $ki, $kd)
+    Write-Host ""
+    Write-Host "TEST mode - exact PID manual return check" -ForegroundColor Cyan
+    Write-Host "Set the PID, let the motor coast, move the mechanism by hand, then release it to HOME."
+    Write-Host "TEST mode does NOT round PID values to the JMP grid." -ForegroundColor Green
+    Write-Host "Start with the mechanism physically at the intended HOME position."
+    Write-Host ""
 
-    & (Join-Path $repo "scripts\position_v2\control_test.ps1") `
-        -Port $script:ActivePort `
-        -TestOffsetDeg 300.0 `
-        -Kp $kp `
-        -Ki $ki `
-        -Kd $kd
+    $kp = Read-ExactPidValue "Kp" ([double]$project.pidRanges.kp[0]) ([double]$project.pidRanges.kp[1]) $defaultKp
+    $ki = Read-ExactPidValue "Ki" ([double]$project.pidRanges.ki[0]) ([double]$project.pidRanges.ki[1]) $defaultKi
+    $kd = Read-ExactPidValue "Kd" ([double]$project.pidRanges.kd[0]) ([double]$project.pidRanges.kd[1]) $defaultKd
 
-    if ($LASTEXITCODE -ne 0) { throw "Physical TEST mode failed." }
+    Write-Host ""
+    Write-Host "Exact PID sent directly to firmware:" -ForegroundColor Yellow
+    Write-Host ("  Kp = {0:R}" -f $kp)
+    Write-Host ("  Ki = {0:R}" -f $ki)
+    Write-Host ("  Kd = {0:R}" -f $kd)
+    Write-Host "  No JMP/grid quantization"
+    Write-Host "  Motor will coast while you manually displace it"
+    Write-Host ""
+
+    $py = Get-Python
+    $checker = Join-Path $repo "tools\manual_return_check.py"
+    if (-not (Test-Path $checker)) {
+        throw "Manual return checker not found: $checker"
+    }
+
+    & $py $checker `
+        --port $script:ActivePort `
+        --kp $kp `
+        --ki $ki `
+        --kd $kd `
+        --minimum-drive-pwm $minimumDrivePWM `
+        --return-max-pwm 225
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Manual return check exited with code $LASTEXITCODE."
+    }
 }
 
 function Start-Jmp {
@@ -132,7 +188,7 @@ function Start-Manual {
 
     Write-Host ""
     Write-Host "MANUAL PID mode" -ForegroundColor Cyan
-    Write-Host "Enter one PID set for a single 300-degree physical trial."
+    Write-Host "Enter one PID set for a single automated 300-degree physical trial."
     Write-Host "Values are rounded to the nearest $pidStep before running."
     Write-Host ("Outbound/setup PID stays at default Kp={0:F3} Ki={1:F3} Kd={2:F3}." -f $setupKp, $setupKi, $setupKd)
     Write-Host ""
@@ -213,20 +269,21 @@ DiscoveryPID modes
       Force fresh home/calibration.
 
   .\DiscoveryPID.ps1 test
-      Run the configured default PID physical test:
-      Kp=$($project.defaultPID.kp), Ki=$($project.defaultPID.ki), Kd=$($project.defaultPID.kd), 300-degree displacement.
+      Enter an exact PID with NO host-side rounding.
+      The motor coasts while you manually displace the mechanism.
+      Press Enter to release it and observe the PID return to HOME.
 
   .\DiscoveryPID.ps1 jmp
       Launch the current JMP Bayesian study.
-      Current PID limits and rounding come from config/discoverypid.json.
+      JMP PID values use the configured $($project.pidCoefficientStep) grid.
 
   .\DiscoveryPID.ps1 manual
-      Prompt for return Kp/Ki/Kd and run one physical trial.
+      Prompt for return Kp/Ki/Kd and run one automated 300-degree physical trial.
       The outbound/setup move uses the configured default PID.
-      PID values are rounded to the nearest $($project.pidCoefficientStep) and use configured limits.
+      Automated trial PID values are rounded to the nearest $($project.pidCoefficientStep).
 
 Run .\DiscoveryPID.ps1 with no command for the four-option menu.
-Optional port override: .\DiscoveryPID.ps1 manual -Port COM8
+Optional port override: .\DiscoveryPID.ps1 test -Port COM8
 "@
 }
 
@@ -238,13 +295,14 @@ function Show-Menu {
         Write-Host "Port: $($script:ActivePort)"
         Write-Host ("Default PID: Kp={0:F3} Ki={1:F3} Kd={2:F3}" -f [double]$project.defaultPID.kp, [double]$project.defaultPID.ki, [double]$project.defaultPID.kd)
         Write-Host "PID limits: Kp <= $($project.pidRanges.kp[1]), Ki <= $($project.pidRanges.ki[1]), Kd <= $($project.pidRanges.kd[1])"
-        Write-Host "PID rounding: nearest $($project.pidCoefficientStep)"
+        Write-Host "TEST PID: exact value entered (no host rounding)" -ForegroundColor Green
+        Write-Host "JMP/automated PID grid: nearest $($project.pidCoefficientStep)"
         Write-Host "PWM floor: $($project.minimumDrivePWM)"
         Write-Host ""
         Write-Host "[1] HOME   - recalibrate / set zero"
-        Write-Host "[2] TEST   - default PID 300-degree physical test"
+        Write-Host "[2] TEST   - exact PID + manual displacement return check"
         Write-Host "[3] JMP    - Bayesian optimization"
-        Write-Host "[4] MANUAL - enter Kp / Ki / Kd"
+        Write-Host "[4] MANUAL - automated 300-deg trial with entered PID"
         Write-Host "[P] PORT   - change serial port"
         Write-Host "[Q] QUIT"
         Write-Host ""
