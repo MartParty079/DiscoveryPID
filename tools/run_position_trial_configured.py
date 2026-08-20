@@ -76,9 +76,9 @@ def enforce_hard_settling_deadline() -> None:
     """Make the return deadline apply until the run actually completes.
 
     The legacy worker disabled its deadline after the first sample that merely
-    entered HomePad. That allowed a run to continue indefinitely after a brief
-    pass through the acceptance window. Replace that condition so the deadline
-    remains active until EVENT TEST_COMPLETE terminates the run.
+    entered HomePad. That allowed a run to continue after a brief pass through
+    the acceptance window. Replace that condition so the deadline remains
+    active until EVENT TEST_COMPLETE terminates the run.
     """
     source = inspect.getsource(worker.main)
     old = (
@@ -101,12 +101,18 @@ def enforce_hard_settling_deadline() -> None:
     worker.main = namespace["main"]
 
 
-def ensure_configured_deadline_argument() -> None:
-    """Use the project deadline unless the caller explicitly supplied one."""
-    if "--max-settling-seconds" not in sys.argv:
-        sys.argv.extend(
-            ["--max-settling-seconds", f"{configured_deadline():g}"]
-        )
+def force_configured_deadline_argument() -> None:
+    """Make config maxSettlingTimeSeconds authoritative for every run."""
+    deadline_text = f"{configured_deadline():g}"
+    option = "--max-settling-seconds"
+    if option in sys.argv:
+        index = sys.argv.index(option)
+        if index + 1 >= len(sys.argv):
+            raise RuntimeError(f"{option} was supplied without a value")
+        sys.argv[index + 1] = deadline_text
+    else:
+        sys.argv.extend([option, deadline_text])
+    print(f"INFO: hard settling deadline = {deadline_text} s", flush=True)
 
 
 # Keep automated/JMP PID values on the configured grid rather than the legacy
@@ -116,5 +122,5 @@ enforce_hard_settling_deadline()
 
 
 if __name__ == "__main__":
-    ensure_configured_deadline_argument()
+    force_configured_deadline_argument()
     raise SystemExit(worker.main())
