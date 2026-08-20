@@ -30,6 +30,11 @@ $taperStartDeg = [double]$config.returnSmoothing.minimumPwmTaperStartDeg
 $taperEndDeg = [double]$config.returnSmoothing.minimumPwmTaperEndDeg
 $integralBandDeg = [double]$config.returnSmoothing.integralEnableBandDeg
 $integralMaxPWM = [double]$config.returnSmoothing.maximumIntegralContributionPWM
+$responseNames = @($config.bayesianOptimization.responses | ForEach-Object { [string]$_.name })
+$expectedResponses = @('Settling Time (s)', 'Overshoot (deg)', 'Oscillations')
+if (($responseNames -join '|') -ne ($expectedResponses -join '|')) {
+    throw "JMP configuration must use exactly: Settling Time (s), Overshoot (deg), Oscillations."
+}
 
 $py = Join-Path $env:USERPROFILE ".platformio\penv\Scripts\python.exe"
 if (-not (Test-Path $py)) {
@@ -60,8 +65,7 @@ if (-not $text.Contains('minimumDrivePWM = 60.0;')) {
 }
 $text = $text.Replace('minimumDrivePWM = 60.0;', $minimumDriveLiteral)
 
-# Expose the quality-failure threshold inside the runtime JSL. v50 classifies
-# completed-but-wild responses before they are admitted to the Bayesian table.
+# Expose the quality-failure threshold inside the runtime JSL.
 $settleLiteral = ("maxSettlingTimeSeconds = {0:F1};" -f [double]$config.maxSettlingTimeSeconds)
 if (-not $text.Contains($settleLiteral)) {
     throw "Runtime JSL validation failed: maxSettlingTimeSeconds literal missing."
@@ -72,8 +76,8 @@ $text = $text.Replace(
     $settleLiteral + "`n" + $overshootLiteral
 )
 
-# Missing settling/entry measurements are right-censored bad responses, not
-# unknown values. Keep every BayesOpt Y numeric before the row reaches JMP.
+# Missing measurements remain numeric. Settling is a modeled response; entry RPM
+# is retained only as a diagnostic column.
 $censorPattern = '(?m)^    Close\( resultDT, No Save \);\r?\n\r?\n    // ---------------------------------------------------------------\r?\n    // RELEASE-TO-HOME MEASUREMENT WARNING'
 $censorMatches = [regex]::Matches($text, $censorPattern)
 if ($censorMatches.Count -ne 1) {
@@ -82,8 +86,6 @@ if ($censorMatches.Count -ne 1) {
 $censorReplacement = @"
     Close( resultDT, No Save );
 
-    // Keep all MULTI-RESPONSE Y values numeric. A missing settling time means
-    // the hard return deadline was not satisfied; record the censor limit.
     If( Is Missing( resultList[2] ), resultList[2] = maxSettlingTimeSeconds );
     If( Is Missing( resultList[7] ), resultList[7] = $missingEntryRpm );
 
@@ -92,14 +94,16 @@ $censorReplacement = @"
 "@
 $text = [regex]::Replace($text, $censorPattern, $censorReplacement, 1)
 
-# A trial that technically returns but flies far past home is not a valid
-# controller. Mark it as a failure so it cannot become the best setup PID.
+# Keep failure status as a diagnostic, but because Return Failure is no longer a
+# Bayesian Y, force failed/non-complete rows to the worst values of the three
+# actual modeled responses. This prevents a no-motion failure from looking like
+# zero overshoot / zero oscillation and becoming attractive to JMP.
 $qualityPattern = '(?m)^\s*Column\( dt, "Status" \)\[rowIndex\] = resultList\[12\];\r?\n\s*Column\( dt, "Return Failure" \)\[rowIndex\] = If\( resultList\[12\] == "COMPLETE", 0, 1 \);'
 $qualityMatches = [regex]::Matches($text, $qualityPattern)
 if ($qualityMatches.Count -ne 1) {
     throw "Runtime JSL validation failed: expected one quality-status insertion point, found $($qualityMatches.Count)."
 }
-$qualityReplacement = @'
+$qualityReplacement = @"
     qualityStatus = resultList[12];
     If(
         resultList[4] > catastrophicOvershootDeg,
@@ -111,12 +115,22 @@ $qualityReplacement = @'
     );
     Column( dt, "Status" )[rowIndex] = qualityStatus;
     Column( dt, "Return Failure" )[rowIndex] = If( qualityStatus == "COMPLETE", 0, 1 );
-'@
+
+    If(
+        qualityStatus != "COMPLETE",
+        Column( dt, "Settling Time (s)" )[rowIndex] = maxSettlingTimeSeconds;
+        Column( dt, "Overshoot (deg)" )[rowIndex] = $overshootCap;
+        Column( dt, "Oscillations" )[rowIndex] = $oscillationCap;
+        Print(
+            "THREE-RESPONSE FAILURE PENALTY: Settling=" || Char( maxSettlingTimeSeconds ) ||
+            " Overshoot=$overshootCap Oscillations=$oscillationCap"
+        );
+    );
+"@
 $text = [regex]::Replace($text, $qualityPattern, $qualityReplacement, 1)
 
-# JMP can intentionally request a replicate. With 0.001-resolution gains the
-# design space is far too large for an exhaustive grid scan, so a duplicate is
-# replaced by the nearest available axial neighbor on the configured grid.
+# Replace repeated fine-grid proposals with a nearby untested point without
+# attempting an exhaustive 3-D scan.
 $duplicatePatternTemplate = '(?m)^\s*proposedKd = Round\( Column\( dt, "KD" \)\[newRow\] / {0} \) \* {0};\r?\n\s*Column\( dt, "KP" \)\[newRow\] = proposedKp;\r?\n\s*Column\( dt, "KI" \)\[newRow\] = proposedKi;\r?\n\s*Column\( dt, "KD" \)\[newRow\] = proposedKd;'
 $duplicatePattern = $duplicatePatternTemplate -f $pidStepRegex
 $duplicateMatches = [regex]::Matches($text, $duplicatePattern)
@@ -138,8 +152,6 @@ $duplicateReplacement = @"
             nearestKi = .;
             nearestKd = .;
 
-            // Search outward in $pidStepLiteral increments. Only six axial
-            // neighbors are checked at each radius, so fine resolution stays fast.
             For(
                 neighborRadius = 1,
                 neighborRadius <= 1000 & !nearestFound,
@@ -245,8 +257,8 @@ $duplicateReplacement = @"
 "@
 $text = [regex]::Replace($text, $duplicatePattern, $duplicateReplacement, 1)
 
-# Keep the live data grid in the foreground before each physical run as well as
-# after saved results. The BayesOpt report can exist, but the table stays visible.
+# Keep the data table available during physical execution. JMP's Bayesian report
+# still contains the three response model/profiler plots.
 $text = $text.Replace(
     "            resultList =`n                runPhysicalTrial(",
     "            dt << Bring Window To Front;`n            resultList =`n                runPhysicalTrial("
@@ -265,17 +277,19 @@ $kiHighLiteral = ("kiHigh = {0:F1};" -f [double]$config.pidRanges.ki[1])
 $kdLowLiteral = ("kdLow = {0:F1};" -f [double]$config.pidRanges.kd[0])
 $kdHighLiteral = ("kdHigh = {0:F1};" -f [double]$config.pidRanges.kd[1])
 $workerLiteral = $worker.Replace('\', '/')
+$responseTokens = @(
+    ':Name( "Settling Time (s)" )',
+    ':Name( "Overshoot (deg)" )',
+    ':Name( "Oscillations" )'
+)
 
 $required = @(
-    'MULTI-RESPONSE BAYESOPT DESIRABILITY',
-    'BayesOpt mode: MULTI-RESPONSE DESIRABILITY',
-    'v48 response shaping: bounded/log-compressed for GP stability',
-    ':Name( "Return Failure" )',
-    ':Name( "Settling Time (s)" )',
-    ':Name( "PWM Chatter" )',
-    ':Name( "Home Entry RPM" )',
-    ':Name( "Overshoot (deg)" )',
-    ':Oscillations',
+    'THREE-RESPONSE BAYESOPT DESIRABILITY',
+    'BayesOpt mode: THREE-RESPONSE DESIRABILITY',
+    'JMP models/profilers plot only these three responses',
+    $responseTokens[0],
+    $responseTokens[1],
+    $responseTokens[2],
     'Raw PWM Chatter',
     'Raw Overshoot (deg)',
     $kpLowLiteral,
@@ -290,7 +304,7 @@ $required = @(
     $pidQuantizationLiteral,
     $workerLiteral,
     'If( Is Missing( resultList[2] ), resultList[2] = maxSettlingTimeSeconds );',
-    'qualityStatus = "EXCESSIVE_OVERSHOOT";',
+    'THREE-RESPONSE FAILURE PENALTY',
     'BAYESIAN DUPLICATE REPLACED',
     'nearest untested',
     'dt << Bring Window To Front;'
@@ -318,10 +332,13 @@ Write-Host "Launching DiscoveryPID JMP physical study" -ForegroundColor Cyan
 Write-Host "  Code branch : main"
 Write-Host "  Port        : $Port"
 Write-Host "  Study       : $($config.studyName)"
-Write-Host "  BayesOpt    : MULTI-RESPONSE desirability" -ForegroundColor Yellow
-Write-Host "  Responses   : failure | settling | bounded chatter | entry RPM | bounded overshoot | OSCILLATION COUNT" -ForegroundColor Yellow
-Write-Host "  Conditioning: chatter=ln(1+raw) capped $chatterCap | overshoot cap $overshootCap deg | entry cap $entryRpmCap RPM | oscillation count cap $oscillationCap" -ForegroundColor Green
-Write-Host "  Failure     : timeout/error OR raw overshoot > $catastrophicOvershootDeg deg"
+Write-Host "  BayesOpt    : THREE-RESPONSE desirability" -ForegroundColor Yellow
+Write-Host "  JMP Y       : Settling Time (s) | Overshoot (deg) | Oscillations" -ForegroundColor Yellow
+Write-Host "  Priority    : fastest settling with essentially zero overshoot and zero oscillations" -ForegroundColor Green
+Write-Host "  Desirability: settling importance 10 | overshoot 10 | oscillations 8"
+Write-Host "  Failure rows: forced to Settling=$($config.maxSettlingTimeSeconds), Overshoot=$overshootCap, Oscillations=$oscillationCap" -ForegroundColor Yellow
+Write-Host "  Diagnostics : chatter, entry RPM, score, Return Failure, raw overshoot remain saved but are NOT JMP responses"
+Write-Host "  JMP plots   : model/profiler output uses only the three responses above" -ForegroundColor Green
 Write-Host "  Duplicates  : rounded PID repeats replaced by nearest untested $pidStepLiteral-grid neighbor" -ForegroundColor Green
 Write-Host "  Model gate  : minimum R-square $minimumRSquare"
 Write-Host "  Score       : diagnostic/setup ranking only; NOT a BayesOpt Y"
@@ -333,11 +350,7 @@ Write-Host "  Integral    : enabled only inside +/-$integralBandDeg deg; contrib
 Write-Host "  Controller  : 100 Hz pure signed PID; reverse PWM is PID braking; zero PWM coasts" -ForegroundColor Green
 Write-Host "  Firmware    : v3.8 final-approach smoothing (flash required)" -ForegroundColor Yellow
 Write-Host "  Displacement: $($config.testOffsetDeg) deg"
-Write-Host "  Target      : <1.0 s, smooth stop, zero oscillations"
 Write-Host "  Settle max  : $($config.maxSettlingTimeSeconds) s HARD CUTOFF"
-Write-Host "  Timeout row : Settling=$($config.dataPolicy.timeoutSettlingResponseSeconds) s + Return Failure=1"
-Write-Host "  Raw metrics : preserved in worker run CSV; raw chatter/overshoot also shown in JMP table"
-Write-Host "  Live table  : kept visible/foregrounded through the study" -ForegroundColor Green
 Write-Host "  Runtime JSL : $runtimeScript"
 Write-Host ""
 

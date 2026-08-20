@@ -1,18 +1,23 @@
 {
-  "profileName": "Direct pure bidirectional PID / v50 final-approach smoothing / focused multi-response BayesOpt / duplicate-free 0.001 grid / 300-degree / 3s cutoff",
+  "profileName": "Direct pure bidirectional PID / v51 three-response BayesOpt / settling-first zero-overshoot objective / duplicate-free 0.001 grid / 300-degree / 3s cutoff",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
   "firmwareId": "DiscoveryPID direct-position-pid-v3.8-final-approach 2026-08-20",
-  "studyName": "PositionStudy_DirectPID_v50_FinalApproachSmooth_300Deg",
-  "dataRoot": "position_autotune_directpid_v50_final_approach_smooth",
+  "studyName": "PositionStudy_DirectPID_v51_ThreeResponse_300Deg",
+  "dataRoot": "position_autotune_directpid_v51_three_response",
   "testOffsetDeg": 300.0,
   "minimumDrivePWM": 0.0,
+  "defaultPID": {
+    "kp": 1.35,
+    "ki": 0.4,
+    "kd": 0.1
+  },
   "pidRanges": {
-    "kp": [0.0, 2.0],
-    "ki": [0.0, 2.0],
-    "kd": [0.0, 1.0]
+    "kp": [0.0, 50.0],
+    "ki": [0.0, 20.0],
+    "kd": [0.0, 20.0]
   },
   "maxSettlingTimeSeconds": 3.0,
   "pidCoefficientStep": 0.001,
@@ -24,52 +29,28 @@
     "scalarScoreRetainedForDiagnosticsAndSetupSelection": true,
     "responses": [
       {
-        "name": "Return Failure",
-        "goal": "minimize",
-        "importance": 8.0,
-        "lower": [0.0, 1.0],
-        "middle": [0.5, 0.15],
-        "upper": [1.0, 0.02]
-      },
-      {
         "name": "Settling Time (s)",
         "goal": "minimize",
-        "importance": 7.0,
+        "importance": 10.0,
         "lower": [0.60, 1.0],
-        "middle": [1.00, 0.85],
-        "upper": [3.0, 0.05]
-      },
-      {
-        "name": "PWM Chatter",
-        "goal": "minimize",
-        "importance": 7.0,
-        "lower": [0.0, 1.0],
-        "middle": [1.0, 0.65],
-        "upper": [3.0, 0.05]
-      },
-      {
-        "name": "Home Entry RPM",
-        "goal": "minimize",
-        "importance": 5.0,
-        "lower": [0.0, 1.0],
-        "middle": [4.0, 0.65],
-        "upper": [10.0, 0.08]
+        "middle": [1.00, 0.80],
+        "upper": [3.0, 0.01]
       },
       {
         "name": "Overshoot (deg)",
         "goal": "minimize",
-        "importance": 6.0,
+        "importance": 10.0,
         "lower": [0.0, 1.0],
-        "middle": [2.0, 0.55],
-        "upper": [10.0, 0.03]
+        "middle": [0.50, 0.10],
+        "upper": [2.0, 0.001]
       },
       {
         "name": "Oscillations",
         "goal": "minimize",
         "importance": 8.0,
         "lower": [0.0, 1.0],
-        "middle": [1.0, 0.25],
-        "upper": [3.0, 0.02]
+        "middle": [1.0, 0.05],
+        "upper": [3.0, 0.001]
       }
     ]
   },
@@ -89,11 +70,16 @@
     "abnormalPenalty": 500.0
   },
   "seedSettings": [
-    [0.1,0,0],
-    [0.50,0,1],
-    [1,0,1],
-    [1.5,1,0],
-    [2,1,1]
+    [1.35, 0.4, 0.1],
+    [21.0, 6.0, 3.0],
+    [22.0, 7.0, 2.0],
+    [23.0, 6.5, 2.0],
+    [22.5, 6.0, 1.5],
+    [23.5, 6.5, 1.0],
+    [24.0, 6.5, 1.5],
+    [24.5, 7.0, 1.0],
+    [25.0, 7.5, 0.5],
+    [26.0, 8.0, 0.5]
   ],
   "dataPolicy": {
     "returnDeadlineSeconds": 3.0,
@@ -105,12 +91,13 @@
     "recoveryMotionIncludedInScoring": false,
     "newSessionPerLaunch": true,
     "duplicateRoundedPidPolicy": "replace an already-tested rounded PID with the nearest untested 0.001-grid neighbor",
-    "returnFailureResponse": "0 only for COMPLETE with raw overshoot <= catastrophicOvershootDeg; otherwise 1",
+    "returnFailureResponse": "retained as a diagnostic column only; not used as a JMP Bayesian response",
     "timeoutSettlingResponseSeconds": 3.0,
     "missingHomeEntryRpmResponse": 10.0,
     "multiResponseRowsRemainNumeric": true,
     "liveJmpTableVisible": true,
     "rawMetricsPreservedInRunCsv": true,
+    "failedTrialThreeResponsePolicy": "non-COMPLETE rows are modeled as Settling=3.0 s, Overshoot=10 deg, Oscillations=3 so failures cannot appear desirable",
     "responseTransforms": {
       "pwmChatter": {
         "method": "min(cap, ln(1 + max(0, raw)))",
