@@ -51,7 +51,7 @@ jobs:
             }
           }
 
-      - name: Check v49 focused optimization configuration
+      - name: Check v50 final-approach optimization configuration
         run: |
           python - <<'PY'
           import json
@@ -63,14 +63,12 @@ jobs:
           fw = Path('src/main.cpp').read_text()
 
           assert cfg['latestBranch'] == 'main'
-          assert cfg['studyName'] == 'PositionStudy_DirectPID_v49_FocusedNoDuplicates_300Deg'
-          assert cfg['dataRoot'] == 'position_autotune_directpid_v49_focused_no_duplicates'
+          assert cfg['studyName'] == 'PositionStudy_DirectPID_v50_FinalApproachSmooth_300Deg'
+          assert cfg['dataRoot'] == 'position_autotune_directpid_v50_final_approach_smooth'
 
-          # v49 is an optimization/data-design revision only. Firmware remains
-          # the v3.7 pure bidirectional PID plant used by v48.
-          assert cfg['firmwareId'] == 'DiscoveryPID direct-position-pid-v3.7-pure-bidirectional 2026-08-20'
-          assert 'EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.7-pure-bidirectional"' in worker
-          assert 'direct-position-pid-v3.7-pure-bidirectional' in fw
+          assert cfg['firmwareId'] == 'DiscoveryPID direct-position-pid-v3.8-final-approach 2026-08-20'
+          assert 'EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.8-final-approach"' in worker
+          assert 'direct-position-pid-v3.8-final-approach' in fw
 
           assert cfg['pidRanges']['kp'] == [20.0, 26.0]
           assert cfg['pidRanges']['ki'] == [5.0, 8.0]
@@ -78,6 +76,24 @@ jobs:
           assert cfg['pidCoefficientStep'] == 0.5
           assert cfg['maxSettlingTimeSeconds'] == 3.0
           assert cfg['minimumDrivePWM'] == 80.0
+
+          smoothing = cfg['returnSmoothing']
+          assert smoothing['minimumPwmTaperStartDeg'] == 8.0
+          assert smoothing['minimumPwmTaperEndDeg'] == 3.0
+          assert smoothing['integralEnableBandDeg'] == 2.0
+          assert smoothing['maximumIntegralContributionPWM'] == 12.0
+          assert smoothing['controlLoopHz'] == 100
+          assert smoothing['pidGeneratedBidirectionalBraking'] is True
+          assert smoothing['zeroCommandHardwareBrake'] is False
+          assert smoothing['coastBeforeReverse'] is False
+
+          assert 'RETURN_MIN_PWM_TAPER_START_DEG = 8.0f' in fw
+          assert 'RETURN_MIN_PWM_TAPER_END_DEG = 3.0f' in fw
+          assert 'POSITION_I_ENABLE_BAND_DEG = 2.0f' in fw
+          assert 'POSITION_I_MAX_PWM = 12.0f' in fw
+          assert 'ki * positionIntegral' in fw
+          assert '-POSITION_I_MAX_PWM' in fw
+          assert 'POSITION_I_MAX_PWM' in fw
 
           for kp, ki, kd in cfg['seedSettings']:
               assert 20.0 <= kp <= 26.0
@@ -111,8 +127,6 @@ jobs:
           assert policy['multiResponseRowsRemainNumeric'] is True
           assert policy['recoveryMotionIncludedInScoring'] is False
 
-          # Runtime PowerShell patches the validated builder output with the two
-          # v49 policies that depend on the already-populated live table.
           assert 'BAYESIAN DUPLICATE REPLACED' in launcher
           assert 'combinationAlreadyCompleted( dt, proposedKp, proposedKi, proposedKd )' in launcher
           assert 'nearest untested' in launcher
@@ -120,7 +134,6 @@ jobs:
           assert 'resultList[4] > catastrophicOvershootDeg' in launcher
           assert 'Column( dt, "Return Failure" )[rowIndex] = If( qualityStatus == "COMPLETE", 0, 1 );' in launcher
           assert 'OSCILLATION COUNT' in launcher
-          assert 'UNCHANGED v3.7 pure bidirectional PID' in launcher
           PY
 
       - name: Build and inspect JMP runtime base
@@ -135,7 +148,7 @@ jobs:
           from pathlib import Path
           text = Path('/tmp/DiscoveryPID_runtime.jsl').read_text()
 
-          assert 'PositionStudy_DirectPID_v49_FocusedNoDuplicates_300Deg' in text
+          assert 'PositionStudy_DirectPID_v50_FinalApproachSmooth_300Deg' in text
           assert 'kpLow = 20.0;' in text
           assert 'kpHigh = 26.0;' in text
           assert 'kiLow = 5.0;' in text
