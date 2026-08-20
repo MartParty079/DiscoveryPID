@@ -14,7 +14,7 @@ from pathlib import Path
 import serial
 from serial import SerialException
 
-EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.6-active-brake"
+EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.7-pure-bidirectional"
 SERIAL_FLOAT_TOL = 1e-3
 ACK_RETRIES = 3
 ACK_TIMEOUT_SECONDS = 2.0
@@ -382,8 +382,6 @@ def pwm_chatter_penalty(
     )
     normalized_variation = total_variation / max_pwm
 
-    # Two units cover the ideal 0 -> drive -> 0 path. Only excess motion in
-    # the control command is treated as chatter.
     return max(0.0, normalized_variation - 2.0)
 
 
