@@ -89,11 +89,14 @@ $text = [regex]::Replace($text, $censorPattern, $censorReplacement, 1)
 # A trial that technically returns but flies far past home is not a valid
 # controller. Mark it as a failure in the JMP table so it cannot become the
 # best setup PID and Return Failure learns the unstable region.
-$qualityOld = @'
-    Column( dt, "Status" )[rowIndex] = resultList[12];
-    Column( dt, "Return Failure" )[rowIndex] = If( resultList[12] == "COMPLETE", 0, 1 );
-'@
-$qualityNew = @'
+# Use a newline-tolerant regex because the Python runtime builder writes LF,
+# while PowerShell here-strings use CRLF on Windows.
+$qualityPattern = '(?m)^\s*Column\( dt, "Status" \)\[rowIndex\] = resultList\[12\];\r?\n\s*Column\( dt, "Return Failure" \)\[rowIndex\] = If\( resultList\[12\] == "COMPLETE", 0, 1 \);'
+$qualityMatches = [regex]::Matches($text, $qualityPattern)
+if ($qualityMatches.Count -ne 1) {
+    throw "Runtime JSL validation failed: expected one quality-status insertion point, found $($qualityMatches.Count)."
+}
+$qualityReplacement = @'
     qualityStatus = resultList[12];
     If(
         resultList[4] > catastrophicOvershootDeg,
@@ -106,21 +109,18 @@ $qualityNew = @'
     Column( dt, "Status" )[rowIndex] = qualityStatus;
     Column( dt, "Return Failure" )[rowIndex] = If( qualityStatus == "COMPLETE", 0, 1 );
 '@
-if (-not $text.Contains($qualityOld)) {
-    throw "Runtime JSL validation failed: v48 quality-status block missing."
-}
-$text = $text.Replace($qualityOld, $qualityNew)
+$text = [regex]::Replace($text, $qualityPattern, $qualityReplacement, 1)
 
 # JMP can intentionally request a replicate. After 0.5-step quantization that
 # caused v48 to execute the same PID many times. v49 replaces an already-tested
 # proposal with the nearest untested point on the configured 0.5-grid.
-$duplicateOld = @'
-        proposedKd = Round( Column( dt, "KD" )[newRow] * 2 ) / 2;
-        Column( dt, "KP" )[newRow] = proposedKp;
-        Column( dt, "KI" )[newRow] = proposedKi;
-        Column( dt, "KD" )[newRow] = proposedKd;
-'@
-$duplicateNew = @'
+# This is also newline-tolerant for Windows/LF interoperability.
+$duplicatePattern = '(?m)^\s*proposedKd = Round\( Column\( dt, "KD" \)\[newRow\] \* 2 \) / 2;\r?\n\s*Column\( dt, "KP" \)\[newRow\] = proposedKp;\r?\n\s*Column\( dt, "KI" \)\[newRow\] = proposedKi;\r?\n\s*Column\( dt, "KD" \)\[newRow\] = proposedKd;'
+$duplicateMatches = [regex]::Matches($text, $duplicatePattern)
+if ($duplicateMatches.Count -ne 1) {
+    throw "Runtime JSL validation failed: expected one quantized Bayesian proposal block, found $($duplicateMatches.Count)."
+}
+$duplicateReplacement = @'
         proposedKd = Round( Column( dt, "KD" )[newRow] * 2 ) / 2;
 
         originalProposedKp = proposedKp;
@@ -203,10 +203,7 @@ $duplicateNew = @'
         Column( dt, "KI" )[newRow] = proposedKi;
         Column( dt, "KD" )[newRow] = proposedKd;
 '@
-if (-not $text.Contains($duplicateOld)) {
-    throw "Runtime JSL validation failed: quantized Bayesian proposal block missing."
-}
-$text = $text.Replace($duplicateOld, $duplicateNew)
+$text = [regex]::Replace($text, $duplicatePattern, $duplicateReplacement, 1)
 
 # Keep the live data grid in the foreground before each physical run as well as
 # after saved results. The BayesOpt report can exist, but the table stays visible.
