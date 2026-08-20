@@ -30,8 +30,8 @@ TELEMETRY_FIELDS = {
 RESULT_HEADERS = [
     "Run", "KP", "KI", "KD", "Score", "Settling Time (s)",
     "Return Timer Started", "Overshoot (deg)", "Oscillations", "PWM Chatter",
-    "IAE (deg*s)", "Peak Output RPM", "Final Error (deg)", "Success", "Status",
-    "Samples", "Firmware", "Raw File",
+    "Home Entry RPM", "IAE (deg*s)", "Peak Output RPM", "Final Error (deg)",
+    "Success", "Status", "Samples", "Firmware", "Raw File",
 ]
 
 RAW_HEADERS = [
@@ -63,7 +63,7 @@ def arguments() -> argparse.Namespace:
     p.add_argument("--overall-timeout", type=float, default=60.0)
     p.add_argument("--max-settling-seconds", type=float, default=3.0)
     p.add_argument("--success-settling-seconds", type=float, default=1.0)
-    p.add_argument("--success-overshoot-deg", type=float, default=5.0)
+    p.add_argument("--success-overshoot-deg", type=float, default=2.0)
     p.add_argument("--success-final-error-deg", type=float, default=1.2)
     p.add_argument("--return-max-pwm", type=float, default=225.0)
     p.add_argument("--home-padding-pulses", type=int, default=2)
@@ -306,6 +306,20 @@ def settling_time(rows: list[dict[str, float | str]], home_padding_pulses: int) 
     return None
 
 
+def home_entry_rpm(rows: list[dict[str, float | str]], home_padding_pulses: int) -> float | None:
+    """Absolute output speed at the first observed entry into the home window."""
+    for row in rows:
+        error_counts = float(row.get("error_counts", math.nan))
+        rpm = float(row.get("rpm", math.nan))
+        if (
+            math.isfinite(error_counts)
+            and abs(error_counts) <= home_padding_pulses
+            and math.isfinite(rpm)
+        ):
+            return abs(rpm)
+    return None
+
+
 def overshoot_and_oscillations(rows: list[dict[str, float | str]]) -> tuple[float, int]:
     if not rows:
         return 0.0, 0
@@ -415,6 +429,7 @@ def write_result(
     return_rows = [row for row in rows if float(row["return_time"]) >= 0]
     return_timer_started = int(bool(return_rows))
     settling = settling_time(return_rows, a.home_padding_pulses)
+    entry_rpm = home_entry_rpm(return_rows, a.home_padding_pulses)
     overshoot, oscillations = overshoot_and_oscillations(return_rows)
     chatter = pwm_chatter_penalty(return_rows, a.return_max_pwm)
     iae = integrated_absolute_error(return_rows)
@@ -426,14 +441,31 @@ def write_result(
     )
     timed_out = status in {"TEST_TIMEOUT", "TEST_PREP_TIMEOUT", "TEST_SETTLING_TIMEOUT"}
     abnormal = status not in {"COMPLETE", "TEST_TIMEOUT", "TEST_PREP_TIMEOUT", "TEST_SETTLING_TIMEOUT"}
+
     settling_for_score = settling if settling is not None else a.max_settling_seconds
+    late_seconds = max(0.0, settling_for_score - 1.0)
+    entry_rpm_for_score = entry_rpm if entry_rpm is not None else 20.0
+
+    # Target-based objective for a genuinely tuned 300-degree return:
+    # - reward raw speed continuously;
+    # - strongly bend the cost upward after the 1.0 s target;
+    # - make command chatter and arriving at home too fast expensive;
+    # - make overshoot increasingly expensive instead of merely linear;
+    # - make every post-crossing oscillation expensive.
+    speed_score = 4.0 * settling_for_score + 20.0 * late_seconds * late_seconds
+    smoothness_score = 8.0 * chatter + 0.15 * entry_rpm_for_score * entry_rpm_for_score
+    overshoot_score = 0.75 * overshoot + 0.20 * overshoot * overshoot
+    oscillation_score = 5.0 * oscillations
+    tracking_score = 0.003 * iae + 0.20 * final_error
+
     score = (
-        2.0 * settling_for_score + 1.0 * overshoot + 0.5 * oscillations
-        + 4.0 * chatter + 0.01 * iae + 0.25 * final_error
+        speed_score + smoothness_score + overshoot_score + oscillation_score
+        + tracking_score
         + (25.0 if timed_out else 0.0) + (500.0 if abnormal else 0.0)
     )
     if not math.isfinite(score):
         score = 9999.0
+
     success = int(
         status == "COMPLETE" and settling is not None
         and settling <= a.success_settling_seconds
@@ -449,14 +481,18 @@ def write_result(
         writer.writerow([
             a.trial, f"{a.kp:.8f}", f"{a.ki:.8f}", f"{a.kd:.8f}", f"{score:.8f}",
             "" if settling is None else f"{settling:.8f}", return_timer_started,
-            f"{overshoot:.8f}", oscillations, f"{chatter:.8f}", f"{iae:.8f}",
+            f"{overshoot:.8f}", oscillations, f"{chatter:.8f}",
+            "" if entry_rpm is None else f"{entry_rpm:.8f}", f"{iae:.8f}",
             f"{peak_rpm:.8f}", f"{final_error:.8f}", success, status, len(return_rows),
             firmware, str(a.raw_file.resolve()),
         ])
+
     print(
         f"RESULT Run={a.trial} KP={a.kp:g} KI={a.ki:g} KD={a.kd:g} "
         f"Score={score:.6f} Settling={settling if settling is not None else 'MISSING'} "
-        f"Chatter={chatter:.4f} ReturnTimerStarted={return_timer_started} "
+        f"Chatter={chatter:.4f} EntryRPM={entry_rpm if entry_rpm is not None else 'MISSING'} "
+        f"SpeedScore={speed_score:.3f} SmoothScore={smoothness_score:.3f} "
+        f"OvershootScore={overshoot_score:.3f} OscScore={oscillation_score:.3f} "
         f"Success={success} Status={status}",
         flush=True,
     )
