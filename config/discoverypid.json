@@ -1,18 +1,23 @@
 {
-  "profileName": "Direct pure bidirectional PID / v51 three-response BayesOpt / 0-3 PID cube / settling-first zero-overshoot objective / duplicate-free 0.001 grid / 300-degree / 5s cutoff",
+  "profileName": "Direct pure bidirectional PID / v52 home-reach BayesOpt / 0-3 PID cube / fixed outbound setup / 0.001 grid / 300-degree / 5s cutoff",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
   "firmwareId": "DiscoveryPID direct-position-pid-v3.8-final-approach 2026-08-20",
-  "studyName": "PositionStudy_DirectPID_v51_ThreeResponse_300Deg",
-  "dataRoot": "position_autotune_directpid_v51_three_response",
+  "studyName": "PositionStudy_DirectPID_v52_HomeReach_300Deg",
+  "dataRoot": "position_autotune_directpid_v52_home_reach",
   "testOffsetDeg": 300.0,
   "minimumDrivePWM": 0.0,
   "defaultPID": {
     "kp": 1.35,
     "ki": 0.4,
     "kd": 0.1
+  },
+  "fixedSetupPID": {
+    "kp": 50.0,
+    "ki": 0.0,
+    "kd": 1.0
   },
   "pidRanges": {
     "kp": [0.0, 3.0],
@@ -29,6 +34,14 @@
     "scalarScoreRetainedForDiagnosticsAndSetupSelection": true,
     "responses": [
       {
+        "name": "Home Shortfall (deg)",
+        "goal": "minimize",
+        "importance": 15.0,
+        "lower": [0.0, 1.0],
+        "middle": [5.0, 0.10],
+        "upper": [300.0, 0.001]
+      },
+      {
         "name": "Settling Time (s)",
         "goal": "minimize",
         "importance": 10.0,
@@ -39,34 +52,19 @@
       {
         "name": "Overshoot (deg)",
         "goal": "minimize",
-        "importance": 10.0,
+        "importance": 6.0,
         "lower": [0.0, 1.0],
-        "middle": [0.50, 0.10],
+        "middle": [0.50, 0.20],
         "upper": [2.0, 0.001]
-      },
-      {
-        "name": "Oscillations",
-        "goal": "minimize",
-        "importance": 8.0,
-        "lower": [0.0, 1.0],
-        "middle": [1.0, 0.05],
-        "upper": [3.0, 0.001]
       }
     ]
   },
   "scoreObjective": {
-    "purpose": "diagnostic ranking and best completed setup PID selection only",
-    "settlingTargetSeconds": 1.0,
-    "speedLinearWeight": 4.0,
-    "lateQuadraticWeight": 20.0,
-    "pwmChatterWeight": 8.0,
-    "homeEntryRpmSquaredWeight": 0.15,
-    "overshootLinearWeight": 0.75,
-    "overshootSquaredWeight": 0.20,
-    "oscillationWeight": 5.0,
-    "iaeWeight": 0.003,
-    "finalErrorWeight": 0.20,
-    "timeoutPenalty": 25.0,
+    "purpose": "diagnostic ranking only; fixed setup PID is used for every outbound/recovery move",
+    "homeShortfallWeight": 100.0,
+    "settlingTimeWeight": 10.0,
+    "overshootWeight": 5.0,
+    "oscillationWeight": 2.0,
     "abnormalPenalty": 500.0
   },
   "seedSettings": [
@@ -80,20 +78,21 @@
     "timeoutStatus": "TEST_SETTLING_TIMEOUT",
     "catastrophicOvershootDeg": 20.0,
     "catastrophicOvershootStatus": "EXCESSIVE_OVERSHOOT",
-    "timeoutRowsEligibleAsBestSetup": false,
-    "catastrophicOvershootRowsEligibleAsBestSetup": false,
     "recoveryMotionIncludedInScoring": false,
     "newSessionPerLaunch": true,
     "duplicateRoundedPidPolicy": "replace an already-tested rounded PID with the nearest untested 0.001-grid neighbor",
     "returnFailureResponse": "retained as a diagnostic column only; not used as a JMP Bayesian response",
-    "timeoutSettlingResponseSeconds": 5.0,
+    "homeReachedPolicy": "Home Reached=1 if any 100 Hz return sample enters HomePad or consecutive samples cross exact Home; otherwise 0",
+    "homeShortfallPolicy": "Home Shortfall is 0 when Home is reached; otherwise it is the closest absolute position error observed during the five-second return",
+    "settlingTimePolicy": "Settling Time ends only after five consecutive 100 Hz samples are stationary inside HomePad; unsuccessful returns are 5.0 s",
+    "homePaddingPolicy": "PID target remains exactly Home=0; HomePad is only the symmetric encoder-count acceptance window after the arm stops",
+    "fixedSetupPolicy": "every outbound 300-degree setup and post-trial recovery uses fixedSetupPID; only candidate Kp Ki Kd vary in Bayesian Optimization",
+    "seedDesignPolicy": "four-point near-corner tetrahedral design at 0.4/2.6 for initial 3-D coverage",
+    "failedTrialPolicy": "preserve measured Home Shortfall and Overshoot; unsuccessful returns receive Settling=5.0 s rather than identical synthetic response triples",
     "missingHomeEntryRpmResponse": 10.0,
     "multiResponseRowsRemainNumeric": true,
     "liveJmpTableVisible": true,
     "rawMetricsPreservedInRunCsv": true,
-    "homePaddingPolicy": "target remains exactly Home=0; home padding is a symmetric encoder-count acceptance window after the mechanism stops",
-    "seedDesignPolicy": "four-point near-corner tetrahedral design at 0.4/2.6 to maximize initial 3-D coverage while avoiding a zero-Kp no-motion seed",
-    "failedTrialThreeResponsePolicy": "non-COMPLETE rows are modeled as Settling=5.0 s, Overshoot=10 deg, Oscillations=3 so failures cannot appear desirable",
     "responseTransforms": {
       "pwmChatter": {
         "method": "min(cap, ln(1 + max(0, raw)))",
