@@ -21,7 +21,7 @@
 #include <string.h>
 
 const char FIRMWARE_VERSION[] =
-    "DiscoveryPID direct-position-pid-v3.8-final-approach 2026-08-20";
+    "DiscoveryPID pure-positional-pid-v4.0 2026-08-21";
 
 constexpr int EEPROM_HOME_MAGIC_ADDRESS = 0;
 constexpr uint32_t EEPROM_HOME_MAGIC = 0x44504944UL; // "DPID"
