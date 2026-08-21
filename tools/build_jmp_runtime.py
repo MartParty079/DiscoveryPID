@@ -74,18 +74,25 @@ def main() -> int:
     if pid_step <= 0.0:
         raise RuntimeError("pidCoefficientStep must be greater than zero")
     pid_step_jsl = jsl_number(pid_step)
+
     study_name = config["studyName"]
     data_root_name = config["dataRoot"]
+    setup_kp = float(config["fixedSetupPID"]["kp"])
+    setup_ki = float(config["fixedSetupPID"]["ki"])
+    setup_kd = float(config["fixedSetupPID"]["kd"])
+
     bo_config = config["bayesianOptimization"]
     minimum_rsquare = float(bo_config["minimumRSquare"])
     responses = bo_config["responses"]
     response_names = [str(response["name"]) for response in responses]
-    if response_names != ["Settling Time (s)", "Overshoot (deg)", "Oscillations"]:
+    expected = ["Home Shortfall (deg)", "Settling Time (s)", "Overshoot (deg)"]
+    if response_names != expected:
         raise RuntimeError(
             "Current JMP study requires exactly these responses in order: "
-            "Settling Time (s), Overshoot (deg), Oscillations"
+            "Home Shortfall (deg), Settling Time (s), Overshoot (deg)"
         )
     response_label = ", ".join(response_names)
+
     transforms = config["dataPolicy"]["responseTransforms"]
     chatter_cap = float(transforms["pwmChatter"]["cap"])
     overshoot_cap = float(transforms["overshootDeg"]["cap"])
@@ -130,7 +137,7 @@ def main() -> int:
         "data root",
     )
 
-    # Experimental region is sourced from config so Manual and JMP stay aligned.
+    # Experimental region is sourced from config. Only candidate Kp/Ki/Kd vary.
     text = replace_required(text, 'kpLow = 0.5;', f'kpLow = {kp_low:.1f};', "Kp low")
     text = replace_required(text, 'kpHigh = 1000.0;', f'kpHigh = {kp_high:.1f};', "Kp high")
     text = replace_required(text, 'kiLow = 0.0;', f'kiLow = {ki_low:.1f};', "Ki low")
@@ -147,9 +154,7 @@ def main() -> int:
     seed_lines = ["seedSettings = {"]
     for index, (kp, ki, kd) in enumerate(config["seedSettings"]):
         comma = "," if index < len(config["seedSettings"]) - 1 else ""
-        seed_lines.append(
-            f"    {{{jsl_number(kp)}, {jsl_number(ki)}, {jsl_number(kd)}}}{comma}"
-        )
+        seed_lines.append(f"    {{{jsl_number(kp)}, {jsl_number(ki)}, {jsl_number(kd)}}}{comma}")
     seed_lines.append("};")
     text = regex_required(
         text,
@@ -158,7 +163,29 @@ def main() -> int:
         "seed design",
     )
 
-    # Add modeled responses plus extra raw diagnostics to the live table.
+    # Make outbound positioning deterministic. The candidate PID controls only
+    # TEST_RETURN; every setup move uses the same fixed strong PID.
+    setup_replacement = f'''resolveSetupPID =
+Function( {{dt, fallbackKp, fallbackKi, fallbackKd}},
+    Eval List(
+        {{
+            {jsl_number(setup_kp)},
+            {jsl_number(setup_ki)},
+            {jsl_number(setup_kd)},
+            .
+        }}
+    );
+);
+
+confirmPhysicalRun ='''
+    text = regex_required(
+        text,
+        r'resolveSetupPID\s*=\s*Function\(.*?\n\);\n\nconfirmPhysicalRun\s*=',
+        setup_replacement,
+        "fixed setup PID",
+    )
+
+    # Add Home reach/shortfall plus diagnostics to the live table.
     old_columns = '''        New Column(
             "Oscillations",
             Numeric,
@@ -173,6 +200,20 @@ def main() -> int:
             Numeric,
             Ordinal,
             Format( "Best", 12 )
+        ),
+
+        New Column(
+            "Home Reached",
+            Numeric,
+            Nominal,
+            Format( "Best", 12 )
+        ),
+
+        New Column(
+            "Home Shortfall (deg)",
+            Numeric,
+            Continuous,
+            Format( "Fixed Dec", 12, 6 )
         ),
 
         New Column(
@@ -212,7 +253,7 @@ def main() -> int:
 
         New Column(
             "IAE (deg*s)",'''
-    text = replace_required(text, old_columns, new_columns, "multi-response columns")
+    text = replace_required(text, old_columns, new_columns, "home-reach columns")
 
     old_limits = '''    // Safe here because Score was just created explicitly as Numeric.
     Column( dt, "Score" ) <<
@@ -227,35 +268,42 @@ def main() -> int:
 
     dt;
 );'''
-
     response_blocks = "\n".join(response_limit_block(response) for response in responses)
-    new_limits = f'''    // Score remains a diagnostic/setup-ranking value only.
+    new_limits = f'''    // Score and all non-Y measurements remain diagnostics only.
     Column( dt, "Score" ) <<
         Set Property(
             "Response Limits",
             {{Goal( Minimize ), Importance( 1 ), Show Limits( 0 )}}
         );
 
-    // THREE-RESPONSE BAYESOPT DESIRABILITY.
-    // JMP models and plots only settling time, overshoot, and oscillations.
-    // Other measured quantities stay in the table as diagnostics only.
+    // THREE-RESPONSE HOME-REACH BAYESOPT.
+    // Priority: reach Home, settle quickly, then suppress overshoot.
 {response_blocks}
 
     dt;
 );'''
     text = replace_required(text, old_limits, new_limits, "response desirability")
 
+    # Export the new metrics in the session CSV.
     text = replace_required(
         text,
         '            "Score,Settling Time (s),Overshoot (deg),Oscillations,IAE (deg*s)," ||',
-        '            "Score,Settling Time (s),Overshoot (deg),Raw Overshoot (deg),Oscillations,PWM Chatter,Raw PWM Chatter,Home Entry RPM,Return Failure,IAE (deg*s)," ||',
+        '            "Score,Home Reached,Home Shortfall (deg),Settling Time (s),Overshoot (deg),Raw Overshoot (deg),Oscillations,PWM Chatter,Raw PWM Chatter,Home Entry RPM,Return Failure,IAE (deg*s)," ||',
         "compact CSV header",
     )
     text = replace_required(
         text,
-        '''                Char( Column( dt, "Oscillations" )[rowIndex] ) || "," ||
+        '''                Char( scoreValue ) || "," ||
+                Char( Column( dt, "Settling Time (s)" )[rowIndex] ) || "," ||
+                Char( Column( dt, "Overshoot (deg)" )[rowIndex] ) || "," ||
+                Char( Column( dt, "Oscillations" )[rowIndex] ) || "," ||
                 Char( Column( dt, "IAE (deg*s)" )[rowIndex] ) || "," ||''',
-        '''                Char( Column( dt, "Raw Overshoot (deg)" )[rowIndex] ) || "," ||
+        '''                Char( scoreValue ) || "," ||
+                Char( Column( dt, "Home Reached" )[rowIndex] ) || "," ||
+                Char( Column( dt, "Home Shortfall (deg)" )[rowIndex] ) || "," ||
+                Char( Column( dt, "Settling Time (s)" )[rowIndex] ) || "," ||
+                Char( Column( dt, "Overshoot (deg)" )[rowIndex] ) || "," ||
+                Char( Column( dt, "Raw Overshoot (deg)" )[rowIndex] ) || "," ||
                 Char( Column( dt, "Oscillations" )[rowIndex] ) || "," ||
                 Char( Column( dt, "PWM Chatter" )[rowIndex] ) || "," ||
                 Char( Column( dt, "Raw PWM Chatter" )[rowIndex] ) || "," ||
@@ -265,7 +313,10 @@ def main() -> int:
         "compact CSV response values",
     )
 
-    old_result_list = '''            asNumber( Column( resultDT, "Overshoot (deg)" )[1] ),
+    # Result CSV -> JSL resultList mapping.
+    old_result_list = '''            asNumber( Column( resultDT, "Settling Time (s)" )[1] ),
+            asNumber( Column( resultDT, "Return Timer Started" )[1] ),
+            asNumber( Column( resultDT, "Overshoot (deg)" )[1] ),
             asNumber( Column( resultDT, "Oscillations" )[1] ),
             asNumber( Column( resultDT, "IAE (deg*s)" )[1] ),
             asNumber( Column( resultDT, "Peak Output RPM" )[1] ),
@@ -273,7 +324,11 @@ def main() -> int:
             asNumber( Column( resultDT, "Success" )[1] ),
             statusText,
             asNumber( Column( resultDT, "Samples" )[1] )'''
-    new_result_list = '''            asNumber( Column( resultDT, "Overshoot (deg)" )[1] ),
+    new_result_list = '''            asNumber( Column( resultDT, "Home Reached" )[1] ),
+            asNumber( Column( resultDT, "Home Shortfall (deg)" )[1] ),
+            asNumber( Column( resultDT, "Settling Time (s)" )[1] ),
+            asNumber( Column( resultDT, "Return Timer Started" )[1] ),
+            asNumber( Column( resultDT, "Overshoot (deg)" )[1] ),
             asNumber( Column( resultDT, "Oscillations" )[1] ),
             asNumber( Column( resultDT, "PWM Chatter" )[1] ),
             asNumber( Column( resultDT, "Home Entry RPM" )[1] ),
@@ -283,44 +338,85 @@ def main() -> int:
             asNumber( Column( resultDT, "Success" )[1] ),
             statusText,
             asNumber( Column( resultDT, "Samples" )[1] )'''
-    text = replace_required(text, old_result_list, new_result_list, "result-list metrics")
+    text = replace_required(text, old_result_list, new_result_list, "result-list home metrics")
 
-    # Old result-list status/sample positions move from 10/11 to 12/13.
-    text = text.replace("resultList[10]", "resultList[12]")
-    text = text.replace("resultList[11]", "resultList[13]")
+    # Replace the legacy first-entry warning with the actual current definition.
+    warning_replacement = '''    // ---------------------------------------------------------------
+    // RELEASE-TO-HOME MEASUREMENT
+    // Home Reached: ever enters HomePad or crosses exact Home.
+    // Home Shortfall: closest error if Home is never reached.
+    // Settling Time: stable stationary HomePad completion; failures = cutoff.
+    // ---------------------------------------------------------------
+    If(
+        resultList[5] != 1 |
+        resultList[15] <= 0 |
+        resultList[14] != "COMPLETE",
 
-    old_save = '''    Column( dt, "Overshoot (deg)" )[rowIndex] = resultList[4];
+        New Window(
+            "DiscoveryPID Trial Warning",
+            V List Box(
+                Text Box(
+                    "Status: " || resultList[14] ||
+                    "\!NHome Reached: " || Char( resultList[2] ) ||
+                    "\!NHome Shortfall: " || Char( resultList[3] ) || " deg" ||
+                    "\!NSettling Time: " || Char( resultList[4] ) || " s" ||
+                    "\!NReturn samples: " || Char( resultList[15] ) ||
+                    "\!N\!NThe measured row is retained so BayesOpt can learn from how close a stalled return got."
+                ),
+                Button Box(
+                    "Dismiss",
+                    Current Window() << Close Window
+                )
+            )
+        );
+    );
+
+    resultList;
+);'''
+    text = regex_required(
+        text,
+        r'    // ---------------------------------------------------------------\n    // RELEASE-TO-HOME MEASUREMENT WARNING.*?\n    resultList;\n\);',
+        warning_replacement,
+        "home-reach trial warning",
+    )
+
+    old_save = '''    Column( dt, "Score" )[rowIndex] = resultList[1];
+    Column( dt, "Settling Time (s)" )[rowIndex] = resultList[2];
+    Column( dt, "Overshoot (deg)" )[rowIndex] = resultList[4];
     Column( dt, "Oscillations" )[rowIndex] = resultList[5];
     Column( dt, "IAE (deg*s)" )[rowIndex] = resultList[6];
     Column( dt, "Peak Output RPM" )[rowIndex] = resultList[7];
     Column( dt, "Final Error (deg)" )[rowIndex] = resultList[8];
     Column( dt, "Success" )[rowIndex] = resultList[9];
-    Column( dt, "Status" )[rowIndex] = resultList[12];
+    Column( dt, "Status" )[rowIndex] = resultList[10];
 
     saveSnapshot( dt );'''
-    new_save = f'''    // Preserve raw diagnostics, while the configured JMP Y list decides
-    // which columns are actually modeled by Bayesian Optimization.
-    Column( dt, "Raw Overshoot (deg)" )[rowIndex] = resultList[4];
+    new_save = f'''    Column( dt, "Score" )[rowIndex] = resultList[1];
+    Column( dt, "Home Reached" )[rowIndex] = resultList[2];
+    Column( dt, "Home Shortfall (deg)" )[rowIndex] = Max( 0.0, resultList[3] );
+    Column( dt, "Settling Time (s)" )[rowIndex] = resultList[4];
+    Column( dt, "Raw Overshoot (deg)" )[rowIndex] = resultList[6];
     Column( dt, "Overshoot (deg)" )[rowIndex] =
-        Min( {overshoot_cap:g}, Max( 0.0, resultList[4] ) );
+        Min( {overshoot_cap:g}, Max( 0.0, resultList[6] ) );
     Column( dt, "Oscillations" )[rowIndex] =
-        Min( {oscillation_cap:g}, Max( 0.0, resultList[5] ) );
-    Column( dt, "Raw PWM Chatter" )[rowIndex] = resultList[6];
+        Min( {oscillation_cap:g}, Max( 0.0, resultList[7] ) );
+    Column( dt, "Raw PWM Chatter" )[rowIndex] = resultList[8];
     Column( dt, "PWM Chatter" )[rowIndex] =
-        Min( {chatter_cap:g}, Log( 1 + Max( 0.0, resultList[6] ) ) );
+        Min( {chatter_cap:g}, Log( 1 + Max( 0.0, resultList[8] ) ) );
     Column( dt, "Home Entry RPM" )[rowIndex] =
-        Min( {entry_rpm_cap:g}, Max( 0.0, resultList[7] ) );
-    Column( dt, "IAE (deg*s)" )[rowIndex] = resultList[8];
-    Column( dt, "Peak Output RPM" )[rowIndex] = resultList[9];
-    Column( dt, "Final Error (deg)" )[rowIndex] = resultList[10];
-    Column( dt, "Success" )[rowIndex] = resultList[11];
-    Column( dt, "Status" )[rowIndex] = resultList[12];
-    Column( dt, "Return Failure" )[rowIndex] = If( resultList[12] == "COMPLETE", 0, 1 );
+        Min( {entry_rpm_cap:g}, Max( 0.0, resultList[9] ) );
+    Column( dt, "IAE (deg*s)" )[rowIndex] = resultList[10];
+    Column( dt, "Peak Output RPM" )[rowIndex] = resultList[11];
+    Column( dt, "Final Error (deg)" )[rowIndex] = resultList[12];
+    Column( dt, "Success" )[rowIndex] = resultList[13];
+    Column( dt, "Status" )[rowIndex] = resultList[14];
+    Column( dt, "Return Failure" )[rowIndex] = If( resultList[14] == "COMPLETE", 0, 1 );
 
     saveSnapshot( dt );
     dt << Bring Window To Front;'''
-    text = replace_required(text, old_save, new_save, "save conditioned metrics")
+    text = replace_required(text, old_save, new_save, "save home-reach metrics")
 
+    # JMP Y list: only shortfall, settling, overshoot.
     y_lines = []
     for index, name in enumerate(response_names):
         comma = "," if index < len(response_names) - 1 else ""
@@ -328,8 +424,6 @@ def main() -> int:
     multi_y = "                Y(\n" + "\n".join(y_lines) + "\n                ),"
     text = replace_required(text, '                Y( :Score ),', multi_y, "configured BayesOpt Y")
 
-    # Let JMP exploit moderately predictive models instead of forcing most
-    # post-seed runs into MaxPro space filling.
     text = replace_required(
         text,
         '                    Minimum RSquare( 0.50 )',
@@ -337,7 +431,7 @@ def main() -> int:
         "BayesOpt minimum R-square",
     )
 
-    # Quantize every physically tested gain to the configured PID step.
+    # Quantize every physically tested candidate gain to the configured step.
     seed_kp_quant = f'        seedKp = Round( seedSettings[seedIndex][1] / {pid_step_jsl} ) * {pid_step_jsl};'
     seed_ki_quant = f'        seedKi = Round( seedSettings[seedIndex][2] / {pid_step_jsl} ) * {pid_step_jsl};'
     seed_kd_quant = f'        seedKd = Round( seedSettings[seedIndex][3] / {pid_step_jsl} ) * {pid_step_jsl};'
@@ -355,7 +449,7 @@ def main() -> int:
     text = replace_required(text, '        proposedKi = Column( dt, "KI" )[newRow];', proposed_ki_quant, "Bayesian Ki quantization")
     text = replace_required(text, '        proposedKd = Column( dt, "KD" )[newRow];', proposed_kd_quant, "Bayesian Kd quantization")
 
-    # Failed physical trials remain finite training rows and never abort the study.
+    # Failed physical rows stay numeric and the study continues.
     text = regex_required(
         text,
         r'\s*If\(\s*Contains\( statusText, "CONTROL_ERROR_" \) == 1,.*?Throw\( statusText \);\s*\);\s*(?=\s*If\(\s*Is Missing\( scoreValue \))',
@@ -363,17 +457,16 @@ def main() -> int:
         "CONTROL_ERROR continuation",
     )
 
-    # Startup window states the exact three responses that JMP will model/plot.
     text = replace_required(
         text,
         '                "Study: " ||\n                studyName ||\n                "\\!NSession: " || sessionName ||\n                "\\!N\\!N" ||',
-        '                "Study: " ||\n                studyName ||\n                "\\!NSession: " || sessionName ||\n                "\\!NBayesOpt mode: THREE-RESPONSE DESIRABILITY\\!N" ||\n                "Responses: Settling Time (s), Overshoot (deg), Oscillations\\!N" ||\n                "Objective: minimize settling time while strongly rejecting overshoot and oscillation\\!N" ||\n                "JMP models/profilers plot only these three responses\\!N\\!N" ||',
+        '                "Study: " ||\n                studyName ||\n                "\\!NSession: " || sessionName ||\n                "\\!NBayesOpt mode: HOME-REACH THREE-RESPONSE DESIRABILITY\\!N" ||\n                "Responses: Home Shortfall (deg), Settling Time (s), Overshoot (deg)\\!N" ||\n                "Objective: reach Home first, then minimize stable settling time and overshoot\\!N" ||\n                "Outbound setup PID is fixed; only candidate Kp/Ki/Kd vary\\!N\\!N" ||',
         "startup response banner",
     )
     text = replace_required(
         text,
         '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\\!N" ||',
-        f'                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s HARD CUTOFF\\!N" ||\n                "Failed trials are forced to worst modeled responses\\!N" ||\n                "BayesOpt model gate: minimum R-square {minimum_rsquare:.2f}\\!N" ||\n                "PID coefficient rounding: nearest {pid_step_jsl}\\!N" ||',
+        f'                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s HARD CUTOFF\\!N" ||\n                "Home Shortfall preserves distance-to-home information from stalled runs\\!N" ||\n                "Fixed setup PID: Kp={setup_kp:g} Ki={setup_ki:g} Kd={setup_kd:g}\\!N" ||\n                "BayesOpt model gate: minimum R-square {minimum_rsquare:.2f}\\!N" ||\n                "PID coefficient rounding: nearest {pid_step_jsl}\\!N" ||',
         "startup timeout/model description",
     )
 
@@ -397,13 +490,13 @@ def main() -> int:
         f"kdHigh = {kd_high:.1f};",
         f"maxSettlingTimeSeconds = {max_settle:.1f};",
         f"Minimum RSquare( {minimum_rsquare:.2f} )",
-        "THREE-RESPONSE BAYESOPT DESIRABILITY",
-        "JMP models/profilers plot only these three responses",
+        "THREE-RESPONSE HOME-REACH BAYESOPT",
+        "Home Shortfall (deg)",
+        "Home Reached",
         *response_refs,
         'Column( dt, "Raw PWM Chatter" )[rowIndex]',
         'Column( dt, "Raw Overshoot (deg)" )[rowIndex]',
-        f'Min( {chatter_cap:g}, Log( 1 + Max( 0.0, resultList[6] ) ) )',
-        f'Min( {overshoot_cap:g}, Max( 0.0, resultList[4] ) )',
+        'Column( dt, "Home Shortfall (deg)" )[rowIndex]',
         'Column( dt, "Return Failure" )[rowIndex]',
         'dt << Bring Window To Front;',
         '"--max-settling-seconds", Char( maxSettlingTimeSeconds )',
@@ -411,6 +504,8 @@ def main() -> int:
         proposed_ki_quant.strip(),
         f'proposedKd = Round( Column( dt, "KD" )[newRow] / {pid_step_jsl} ) * {pid_step_jsl};',
         jsl_path(worker),
+        f"{setup_kp:g}",
+        f"{setup_kd:g}",
     ]
     missing = [token for token in required if token not in text]
     if missing:
@@ -418,21 +513,20 @@ def main() -> int:
     if 'Y( :Score )' in text:
         raise RuntimeError("Runtime JSL validation failed: scalar Score is still BayesOpt Y")
     if multi_y not in text:
-        raise RuntimeError("Runtime JSL validation failed: configured three-response Y block missing")
+        raise RuntimeError("Runtime JSL validation failed: configured home-reach Y block missing")
 
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(text, encoding="utf-8", newline="\n")
     print(f"Built validated runtime JSL: {a.output}")
-    print("BayesOpt: THREE-RESPONSE desirability")
+    print("BayesOpt: HOME-REACH three-response desirability")
     print(f"Responses: {response_label}")
-    print("Objective: lowest settling time with essentially zero overshoot and zero oscillations")
-    print("JMP model/profiler output is limited to these three responses")
+    print("Objective: reach Home first, then settle as quickly as possible without overshoot")
+    print(f"Fixed outbound/recovery PID: Kp={setup_kp:g}, Ki={setup_ki:g}, Kd={setup_kd:g}")
     print(f"PID range: Kp {kp_low:g}-{kp_high:g}, Ki {ki_low:g}-{ki_high:g}, Kd {kd_low:g}-{kd_high:g}")
     print(f"PID coefficient rounding: nearest {pid_step:g}")
     print(f"Physical worker: {worker}")
     print(f"BayesOpt minimum R-square: {minimum_rsquare:.2f}")
-    print(f"Settling timeout: {max_settle:.1f} s")
-    print(f"Modeled response caps: overshoot={overshoot_cap:g} deg, oscillations={oscillation_cap:g}")
+    print(f"Return cutoff: {max_settle:.1f} s")
     return 0
 
 
