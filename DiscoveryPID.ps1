@@ -186,16 +186,16 @@ function Start-Jmp {
 
 function Start-Manual {
     $pidStep = [double]$project.pidCoefficientStep
-    $setupKp = [double]$project.defaultPID.kp
-    $setupKi = [double]$project.defaultPID.ki
-    $setupKd = [double]$project.defaultPID.kd
+    $setupKp = [double]$project.fixedSetupPID.kp
+    $setupKi = [double]$project.fixedSetupPID.ki
+    $setupKd = [double]$project.fixedSetupPID.kd
     $maxSettlingTimeSeconds = [double]$project.maxSettlingTimeSeconds
 
     Write-Host ""
     Write-Host "MANUAL PID mode" -ForegroundColor Cyan
     Write-Host "Enter one PID set for a single automated 300-degree physical trial."
     Write-Host "Values are rounded to the nearest $pidStep before running."
-    Write-Host ("Outbound/setup PID stays at default Kp={0:F3} Ki={1:F3} Kd={2:F3}." -f $setupKp, $setupKi, $setupKd)
+    Write-Host ("Outbound/setup PID is fixed at Kp={0:F3} Ki={1:F3} Kd={2:F3}." -f $setupKp, $setupKi, $setupKd)
     Write-Host ""
 
     $kp = Read-PidValue "Kp" ([double]$project.pidRanges.kp[0]) ([double]$project.pidRanges.kp[1])
@@ -208,10 +208,10 @@ function Start-Manual {
     Write-Host ("  Kp = {0:F3}" -f $kp)
     Write-Host ("  Ki = {0:F3}" -f $ki)
     Write-Host ("  Kd = {0:F3}" -f $kd)
-    Write-Host ("  Setup PID = {0:F3} / {1:F3} / {2:F3}" -f $setupKp, $setupKi, $setupKd)
+    Write-Host ("  Fixed setup PID = {0:F3} / {1:F3} / {2:F3}" -f $setupKp, $setupKi, $setupKd)
     Write-Host "  Displacement = 300 deg"
     Write-Host ("  Settling max = {0:g} s HARD CUTOFF" -f $maxSettlingTimeSeconds)
-    Write-Host "  PWM floor = $minimumDrivePWM (tapers near home)"
+    Write-Host "  PWM floor = $minimumDrivePWM (return only)"
     Write-Host "  Controller = 100 Hz active-brake direct PID"
     Write-Host ""
 
@@ -282,11 +282,12 @@ DiscoveryPID modes
   .\DiscoveryPID.ps1 jmp
       Launch the current JMP Bayesian study.
       JMP PID values use the configured $($project.pidCoefficientStep) grid.
-      Each return has a hard $($project.maxSettlingTimeSeconds)-second settling deadline.
+      BayesOpt varies only Kp/Ki/Kd and models Home Shortfall, Settling Time, and Overshoot.
+      Every outbound/recovery move uses the fixed setup PID.
 
   .\DiscoveryPID.ps1 manual
       Prompt for return Kp/Ki/Kd and run one automated 300-degree physical trial.
-      The outbound/setup move uses the configured default PID.
+      The outbound/setup move uses the configured fixed setup PID.
       Automated trial PID values are rounded to the nearest $($project.pidCoefficientStep).
 
 Run .\DiscoveryPID.ps1 with no command for the four-option menu.
@@ -301,6 +302,7 @@ function Show-Menu {
         Write-Host $project.profileName -ForegroundColor DarkCyan
         Write-Host "Port: $($script:ActivePort)"
         Write-Host ("Default PID: Kp={0:F3} Ki={1:F3} Kd={2:F3}" -f [double]$project.defaultPID.kp, [double]$project.defaultPID.ki, [double]$project.defaultPID.kd)
+        Write-Host ("Fixed setup PID: Kp={0:F3} Ki={1:F3} Kd={2:F3}" -f [double]$project.fixedSetupPID.kp, [double]$project.fixedSetupPID.ki, [double]$project.fixedSetupPID.kd)
         Write-Host "PID limits: Kp <= $($project.pidRanges.kp[1]), Ki <= $($project.pidRanges.ki[1]), Kd <= $($project.pidRanges.kd[1])"
         Write-Host "TEST PID: exact value entered (no host rounding)" -ForegroundColor Green
         Write-Host "JMP/automated PID grid: nearest $($project.pidCoefficientStep)"
