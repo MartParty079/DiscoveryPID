@@ -3,7 +3,8 @@
 
 This wrapper keeps the proven physical-trial implementation in
 run_position_trial.py while replacing its legacy hard-coded 0.5 PID
-quantization and enforcing the configured hard return-settling deadline.
+quantization, enforcing the configured hard return-settling deadline, and
+accepting the compact 100 Hz FAST telemetry emitted by the firmware.
 """
 
 from __future__ import annotations
@@ -19,6 +20,12 @@ import run_position_trial as worker
 
 REPO = Path(__file__).resolve().parents[1]
 CONFIG_PATH = REPO / "config" / "discoverypid.json"
+
+# The configured worker captures the active argparse namespace so compact FAST
+# telemetry does not need to repeat static KP/KI/KD values 100 times per second.
+# Those gains are already written to and verified against STATUS before motion.
+_original_arguments = worker.arguments
+_active_args = None
 
 
 def load_config() -> dict:
@@ -37,6 +44,50 @@ def configured_deadline() -> float:
     if not math.isfinite(deadline) or deadline <= 0.0:
         raise RuntimeError("maxSettlingTimeSeconds must be a finite value greater than zero")
     return deadline
+
+
+def configured_arguments():
+    global _active_args
+    _active_args = _original_arguments()
+    return _active_args
+
+
+def compact_aware_telemetry(line: str) -> dict[str, float] | None:
+    """Accept legacy verbose rows plus the compact 100 Hz FAST row.
+
+    Compact firmware format:
+      F U=<ms> T=<trial> M=<mode> H=<homed> P=<pos> G=<target>
+        E=<error> X=<error counts> R=<rpm> C=<counts> W=<pwm>
+    """
+    values = worker.numeric_pairs(line)
+
+    if worker.TELEMETRY_FIELDS.issubset(values):
+        return values
+
+    compact_fields = {"U", "T", "M", "H", "P", "G", "E", "X", "R", "C", "W"}
+    if not line.startswith("F ") or not compact_fields.issubset(values):
+        return None
+
+    if _active_args is None:
+        return None
+
+    return {
+        "ControllerMs": values["U"],
+        "Trial": values["T"],
+        "Mode": values["M"],
+        "Homed": values["H"],
+        "KP": float(_active_args.kp),
+        "KI": float(_active_args.ki),
+        "KD": float(_active_args.kd),
+        "PosDeg": values["P"],
+        "PosTarget": values["G"],
+        "PosError": values["E"],
+        "ErrCounts": values["X"],
+        "SpeedTarget": 0.0,
+        "OutRPM": values["R"],
+        "Counts": values["C"],
+        "PWM": values["W"],
+    }
 
 
 def quantize(value: float, step: float) -> float:
@@ -116,7 +167,10 @@ def force_configured_deadline_argument() -> None:
 
 
 # Keep automated/JMP PID values on the configured grid rather than the legacy
-# 0.5 grid, and keep the return deadline active until the run truly completes.
+# 0.5 grid, consume every compact 100 Hz arm-position sample, and keep the
+# return deadline active until the run truly completes.
+worker.arguments = configured_arguments
+worker.telemetry = compact_aware_telemetry
 worker.quantize_pid = quantize_pid
 enforce_hard_settling_deadline()
 
