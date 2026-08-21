@@ -31,7 +31,7 @@
     "mode": "multiResponseDesirability",
     "minimumRSquare": 0.10,
     "scalarScoreUsedAsBayesianResponse": false,
-    "scalarScoreRetainedForDiagnosticsAndSetupSelection": true,
+    "scalarScoreRetainedForDiagnosticsAndSetupSelection": false,
     "responses": [
       {
         "name": "Home Shortfall (deg)",
