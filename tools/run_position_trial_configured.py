@@ -4,8 +4,8 @@
 The legacy worker remains the serial/control transport. This wrapper makes the
 current study behavior authoritative: 0.001-grid candidate gains, fixed
 outbound/recovery PID, compact 100 Hz telemetry, a five-second hard return
-window, stable HomePad completion, and continuous Home Shortfall feedback for
-Bayesian Optimization.
+window, stable HomePad completion, continuous Home Shortfall feedback, and an
+exact firmware identity check before any physical motion.
 """
 
 from __future__ import annotations
@@ -56,10 +56,13 @@ def fixed_setup_pid() -> tuple[float, float, float]:
 
 def configured_arguments():
     global _active_args
+    config = load_config()
     a = _original_arguments()
     a.setup_kp, a.setup_ki, a.setup_kd = fixed_setup_pid()
+    a.expected_firmware = str(config["firmwareId"])
     a.host_settling_time = None
     _active_args = a
+    print(f"INFO: required firmware = {a.expected_firmware}", flush=True)
     return a
 
 
@@ -122,7 +125,7 @@ def quantize_pid(a) -> None:
 
 
 def configured_recover_home(port, timeout: float = 20.0) -> bool:
-    """Recover using the fixed strong setup PID, never the failed candidate."""
+    """Recover using the fixed setup PID, never the failed candidate."""
     kp, ki, kd = fixed_setup_pid()
     try:
         worker.send_with_ack(port, f"KP={kp:g}", "ACK KP=", kp)
@@ -331,8 +334,6 @@ def patch_worker_main() -> None:
         raise RuntimeError("worker 100 Hz HomePad patch point was not found exactly once")
     source = source.replace(old_sample, new_sample, 1)
 
-    # Do not flood PowerShell/JMP with 100 telemetry lines/s. Every row is still
-    # parsed and saved; only compact F rows are suppressed on the console.
     old_print = '            print(line, flush=True)'
     new_print = (
         '            if not line.startswith("F "):\n'
