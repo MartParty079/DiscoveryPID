@@ -118,7 +118,7 @@
     "integralEnableBandDeg": 2.0,
     "maximumIntegralContributionPWM": 12.0,
     "outputRpmFilterAlpha": 0.15,
-    "fastTelemetryHz": 20,
+    "fastTelemetryHz": 100,
     "pidGeneratedBidirectionalBraking": true,
     "zeroCommandHardwareBrake": false,
     "zeroCommandBehavior": "coast",
