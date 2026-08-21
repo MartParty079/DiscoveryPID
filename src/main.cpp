@@ -10,6 +10,8 @@
 // applied immediately, so the D term can generate reverse torque before the
 // target is crossed. There is NO separate hardware-brake algorithm: PID=0
 // means motor coast. Braking torque comes only from signed PID output.
+// FAST telemetry is a compact sample emitted on every 10 ms control update so
+// recorded position traces preserve the controller's full 100 Hz time base.
 
 #include <Arduino.h>
 #include <EEPROM.h>
@@ -47,7 +49,7 @@ constexpr float DEGREES_PER_OUTPUT_COUNT = 360.0f / COUNTS_PER_OUTPUT_REV;
 // ============================================================================
 
 constexpr uint32_t CONTROL_INTERVAL_MS = 10;       // 100 Hz closed-loop PID.
-constexpr uint8_t TELEMETRY_DIVIDER = 5;           // FAST: ~20 rows/s.
+constexpr uint8_t TELEMETRY_DIVIDER = 1;           // FAST: one row/control tick = 100 Hz.
 constexpr uint8_t HUMAN_TELEMETRY_DIVIDER = 50;    // HUMAN: ~2 rows/s.
 
 enum class TelemetryMode : uint8_t
@@ -1054,29 +1056,23 @@ void readSerialCommands()
 // TELEMETRY
 // ============================================================================
 
-void printTelemetry(long currentCount, long deltaCount, float currentPositionDeg)
+void printTelemetry(uint32_t controlTimeMs, long currentCount, float currentPositionDeg)
 {
-    Serial.print("Trial="); Serial.print(trialNumber);
-    Serial.print(" Mode="); Serial.print(static_cast<uint8_t>(mode));
-    Serial.print(" Homed="); Serial.print(homed ? 1 : 0);
-    Serial.print(" KP="); Serial.print(positionKp, 5);
-    Serial.print(" KI="); Serial.print(positionKi, 5);
-    Serial.print(" KD="); Serial.print(positionKd, 5);
-    Serial.print(" PosDeg="); Serial.print(currentPositionDeg, 3);
-    Serial.print(" PosTarget="); Serial.print(targetPositionDeg, 3);
-    Serial.print(" PosError="); Serial.print(positionErrorDeg, 3);
-    Serial.print(" PosIntegral="); Serial.print(positionIntegral, 3);
-    Serial.print(" SpeedTarget="); Serial.print(targetOutputRPM, 3);
-    Serial.print(" OutRPM="); Serial.print(measuredOutputRPM, 3);
-    Serial.print(" MotorRPM="); Serial.print(measuredMotorRPM, 1);
-    Serial.print(" Counts="); Serial.print(currentCount);
-    Serial.print(" dC="); Serial.print(deltaCount);
-    Serial.print(" ErrCounts="); Serial.print(targetEncoderCount() - currentCount);
-    Serial.print(" HomePad="); Serial.print(homePaddingPulses);
-    Serial.print(" SKP="); Serial.print(setupKp, 4);
-    Serial.print(" SKI="); Serial.print(setupKi, 4);
-    Serial.print(" SKD="); Serial.print(setupKd, 4);
-    Serial.print(" PWM="); Serial.println(appliedMotorCommand, 1);
+    // Compact 100 Hz trace. Short field names keep the stream comfortably
+    // below the 115200-baud link budget while preserving every control sample.
+    // U=controller ms, T=trial, M=mode, H=homed, P=position, G=target,
+    // E=position error, X=error counts, R=output RPM, C=encoder count, W=PWM.
+    Serial.print("F U="); Serial.print(controlTimeMs);
+    Serial.print(" T="); Serial.print(trialNumber);
+    Serial.print(" M="); Serial.print(static_cast<uint8_t>(mode));
+    Serial.print(" H="); Serial.print(homed ? 1 : 0);
+    Serial.print(" P="); Serial.print(currentPositionDeg, 3);
+    Serial.print(" G="); Serial.print(targetPositionDeg, 3);
+    Serial.print(" E="); Serial.print(positionErrorDeg, 3);
+    Serial.print(" X="); Serial.print(targetEncoderCount() - currentCount);
+    Serial.print(" R="); Serial.print(measuredOutputRPM, 3);
+    Serial.print(" C="); Serial.print(currentCount);
+    Serial.print(" W="); Serial.println(appliedMotorCommand, 1);
 }
 
 // ============================================================================
@@ -1133,6 +1129,10 @@ void loop()
     const float dt = static_cast<float>(now - previousControlTime) / 1000.0f;
     previousControlTime = now;
 
+    // EncoderCount itself is maintained asynchronously on every A/B edge.
+    // This atomic snapshot is converted to arm position on every 10 ms control
+    // tick, so control and logged FAST position samples share the same 100 Hz
+    // source sample.
     const long currentCount = readEncoderAtomic();
     const long deltaCount = currentCount - previousEncoderCount;
     previousEncoderCount = currentCount;
@@ -1194,7 +1194,7 @@ void loop()
         if (++fastTelemetryDivider >= TELEMETRY_DIVIDER)
         {
             fastTelemetryDivider = 0;
-            printTelemetry(currentCount, deltaCount, currentPositionDeg);
+            printTelemetry(now, currentCount, currentPositionDeg);
         }
     }
     else if (telemetryMode == TelemetryMode::HUMAN)
