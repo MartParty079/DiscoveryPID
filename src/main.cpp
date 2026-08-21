@@ -1,17 +1,18 @@
-// DiscoveryPID position-hold firmware
+// DiscoveryPID position-control firmware
 // Arduino Mega 2560 + Adafruit 4416 geared motor + DRV8871.
 //
-// Control architecture:
-//   TEST_OUT: best-scoring completed PID so far -> signed PWM directly
-//   TEST_RETURN: current candidate PID -> signed PWM directly
+// Candidate TEST_RETURN architecture:
+//   pure encoder-position PID at 100 Hz
+//   u = Kp*error + Ki*integral - Kd*measured_position_velocity
+//   no minimum PWM floor
+//   no near-home taper or gain scheduling
+//   no position deadband
+//   no integral enable band / bleed / separate I-output cap
+//   no coast-on-settle override while the candidate is being measured
 //
-// The position PID runs locally on the Mega every 10 ms. Encoder quadrature
-// edges are counted asynchronously by interrupts. Opposite-sign PID output is
-// applied immediately, so the D term can generate reverse torque before the
-// target is crossed. There is NO separate hardware-brake algorithm: PID=0
-// means motor coast. Braking torque comes only from signed PID output.
-// FAST telemetry is a compact sample emitted on every 10 ms control update so
-// recorded position traces preserve the controller's full 100 Hz time base.
+// TEST_OUT uses a fixed setup PID. A setup-only 100 PWM breakaway pulse may be
+// added when that controller is nearly stationary and outside the setup target
+// tolerance. The assist is never used during TEST_RETURN.
 
 #include <Arduino.h>
 #include <EEPROM.h>
@@ -26,17 +27,13 @@ constexpr int EEPROM_HOME_MAGIC_ADDRESS = 0;
 constexpr uint32_t EEPROM_HOME_MAGIC = 0x44504944UL; // "DPID"
 
 // ============================================================================
-// HARDWARE
+// HARDWARE / ENCODER CALIBRATION
 // ============================================================================
 
 constexpr uint8_t ENC_A_PIN = 2;
 constexpr uint8_t ENC_B_PIN = 3;
 constexpr uint8_t MOTOR_IN1_PIN = 9;
 constexpr uint8_t MOTOR_IN2_PIN = 10;
-
-// ============================================================================
-// MOTOR / ENCODER CALIBRATION
-// ============================================================================
 
 constexpr float GEAR_RATIO = 30613.0f / 1500.0f;
 constexpr float COUNTS_PER_MOTOR_REV = 56.0f;
@@ -45,12 +42,12 @@ constexpr float COUNTS_PER_OUTPUT_REV = COUNTS_PER_MOTOR_REV * GEAR_RATIO;
 constexpr float DEGREES_PER_OUTPUT_COUNT = 360.0f / COUNTS_PER_OUTPUT_REV;
 
 // ============================================================================
-// TIMING
+// TIMING / TELEMETRY
 // ============================================================================
 
 constexpr uint32_t CONTROL_INTERVAL_MS = 10;       // 100 Hz closed-loop PID.
-constexpr uint8_t TELEMETRY_DIVIDER = 1;           // FAST: one row/control tick = 100 Hz.
-constexpr uint8_t HUMAN_TELEMETRY_DIVIDER = 50;    // HUMAN: ~2 rows/s.
+constexpr uint8_t TELEMETRY_DIVIDER = 1;           // FAST = 100 Hz.
+constexpr uint8_t HUMAN_TELEMETRY_DIVIDER = 50;    // HUMAN ~2 Hz.
 
 enum class TelemetryMode : uint8_t
 {
@@ -65,17 +62,12 @@ TelemetryMode telemetryMode = TelemetryMode::HUMAN;
 // CALIBRATION
 // ============================================================================
 
-constexpr long CALIBRATION_MIN_SPAN_COUNTS = 96;  // ~30 output degrees total.
+constexpr long CALIBRATION_MIN_SPAN_COUNTS = 96;
 constexpr uint8_t CALIBRATION_MIN_REVERSALS = 1;
 constexpr uint32_t CALIBRATION_STILL_MS = 1500;
 
 // ============================================================================
-// DIRECT POSITION PID — RUNTIME/JMP TUNABLE
-//
-// PWM = Kp*positionError + Ki*integral - Kd*measuredPositionVelocity
-//
-// Kd therefore becomes genuine braking torque when approach velocity makes
-// the net PID command oppose the current shaft motion.
+// PURE POSITIONAL PID
 // ============================================================================
 
 float positionKp = 1.35f;
@@ -92,50 +84,47 @@ constexpr float MAX_POSITION_KD = 200.0f;
 constexpr float MAX_PWM_COMMAND = 225.0f;
 float maximumReturnPWM = 225.0f;
 
-// Full breakaway floor far from home. For TEST_RETURN it now tapers to zero
-// earlier so the last few degrees are controlled by P/I/D rather than a forced
-// minimum motor command.
-float minimumDrivePWM = 80.0f;
-constexpr float RETURN_MIN_PWM_TAPER_START_DEG = 8.0f;
-constexpr float RETURN_MIN_PWM_TAPER_END_DEG = 3.0f;
+// The candidate controller has no minimum drive floor. This variable remains
+// in STATUS/serial protocol for compatibility, but nonzero MINPWM is rejected.
+float minimumDrivePWM = 0.0f;
 
-// Encoder velocity is quantized at the 10 ms control rate. Filtering suppresses
-// one-count derivative noise while retaining useful D-term braking response.
+// Filtering only affects the measured derivative signal. It does not schedule
+// gains or modify the controller near Home.
 constexpr float OUTPUT_RPM_FILTER_ALPHA = 0.15f;
 
-constexpr float POSITION_INTEGRAL_LIMIT = 80.0f;
-constexpr float POSITION_I_ENABLE_BAND_DEG = 2.0f;
-constexpr float POSITION_I_MAX_PWM = 12.0f;
-constexpr float POSITION_I_BLEED_PER_SEC = 8.0f;
-float previousPositionErrorDeg = 0.0f;
-
-constexpr float POSITION_DEADBAND_DEG = 0.45f;
-constexpr float POSITION_EXIT_DEADBAND_DEG = 0.90f;
-constexpr float POSITION_DEADBAND_RPM = 1.20f;
+// Integral is active over the entire position range. The only limiter is a
+// generous state clamp plus normal output anti-windup at maximumReturnPWM.
+constexpr float POSITION_INTEGRAL_LIMIT = 2000.0f;
+float positionIntegral = 0.0f;
 
 long homePaddingPulses = 2;
 constexpr uint8_t POSITION_SETTLE_REQUIRED_SAMPLES = 5;
 
 // ============================================================================
-// TEST PROFILE
+// TEST PROFILE / FIXED SETUP CONTROLLER
 // ============================================================================
 
 constexpr float MIN_TEST_OFFSET_DEG = 5.0f;
 constexpr float MAX_TEST_OFFSET_DEG = 1000000.0f;
 
+// Fixed outbound/setup PID requested for repeatable positioning.
 float setupKp = 1.35f;
 float setupKi = 0.40f;
 float setupKd = 0.10f;
+
+// Setup-only static-friction assist. Never applied to TEST_RETURN.
+constexpr float SETUP_ASSIST_PWM = 100.0f;
+constexpr uint32_t SETUP_ASSIST_ON_MS = 50;
+constexpr uint32_t SETUP_ASSIST_PERIOD_MS = 250;
+constexpr float SETUP_ASSIST_MAX_RPM = 1.0f;
+constexpr float SETUP_ASSIST_MIN_ERROR_DEG = 1.5f;
 
 constexpr float TEST_OFFSET_TOLERANCE_DEG = 1.5f;
 constexpr float TEST_OFFSET_TOLERANCE_RPM = 2.0f;
 constexpr uint32_t TEST_OFFSET_SETTLE_MS = 350;
 constexpr uint32_t TEST_DWELL_MS = 500;
 constexpr uint32_t TEST_PREP_TIMEOUT_MS = 45000;
-constexpr uint32_t TEST_RETURN_SETTLE_MS = 1000;
 constexpr uint32_t TEST_RETURN_TIMEOUT_MS = 45000;
-constexpr float TEST_HOME_TOLERANCE_DEG = 1.2f;
-constexpr float TEST_HOME_TOLERANCE_RPM = 1.5f;
 
 // ============================================================================
 // MODE
@@ -191,7 +180,6 @@ long readEncoderAtomic()
 
 Mode mode = Mode::CALIBRATING;
 bool homed = false;
-bool positionDeadbandActive = false;
 bool positionSettledLatch = false;
 uint8_t positionSettleSamples = 0;
 
@@ -205,7 +193,6 @@ float measuredMotorRPM = 0.0f;
 
 float targetPositionDeg = 0.0f;
 float positionErrorDeg = 0.0f;
-float positionIntegral = 0.0f;
 float targetOutputRPM = 0.0f;
 float appliedMotorCommand = 0.0f;
 
@@ -226,11 +213,11 @@ char faultCode[32] = "NONE";
 // MOTOR OUTPUT
 // ============================================================================
 
-// DRV8871 usage for this pure-PID study:
+// DRV8871 usage for this study:
 //   IN1=0 IN2=0 -> coast
-//   IN1=0 IN2=PWM -> one signed drive direction
-//   IN1=PWM IN2=0 -> opposite signed drive direction
-// Hardware IN1=1 / IN2=1 braking is intentionally NOT used.
+//   IN1=0 IN2=PWM -> one signed direction
+//   IN1=PWM IN2=0 -> opposite signed direction
+// Hardware brake mode is never used. Signed PID output alone provides braking.
 
 void setMotorCoast()
 {
@@ -269,18 +256,13 @@ void setMotorDrive(float command)
 
 void applyClosedLoopMotorCommand(float desiredCommand)
 {
-    // No coast-before-reverse interlock and no separate brake state.
-    // Every 10 ms, the signed PID output is applied directly. If Kd makes the
-    // command oppose motion, that signed reverse PWM is the braking torque.
     setMotorDrive(desiredCommand);
 }
 
 void resetControllers()
 {
     positionIntegral = 0.0f;
-    previousPositionErrorDeg = 0.0f;
     targetOutputRPM = 0.0f;
-    positionDeadbandActive = false;
     positionSettledLatch = false;
     positionSettleSamples = 0;
     setMotorCoast();
@@ -371,6 +353,7 @@ long targetEncoderCount()
     return homeEncoderCount + lroundf(countOffset);
 }
 
+// Measurement-only settled latch. It NEVER changes candidate PID output.
 bool updatePositionSettledLatch(long currentCount, long deltaCount)
 {
     const bool settlingAllowed =
@@ -392,19 +375,13 @@ bool updatePositionSettledLatch(long currentCount, long deltaCount)
             positionSettledLatch = false;
             positionSettleSamples = 0;
         }
-        else
-        {
-            positionIntegral = 0.0f;
-            targetOutputRPM = 0.0f;
-            setMotorCoast();
-            return true;
-        }
+        return positionSettledLatch;
     }
 
-    const bool withinEncoderResolution = labs(errorCounts) <= homePaddingPulses;
+    const bool insideHomePad = labs(errorCounts) <= homePaddingPulses;
     const bool noNewEncoderCount = deltaCount == 0;
 
-    if (withinEncoderResolution && noNewEncoderCount)
+    if (insideHomePad && noNewEncoderCount)
     {
         if (positionSettleSamples < POSITION_SETTLE_REQUIRED_SAMPLES)
         {
@@ -414,15 +391,10 @@ bool updatePositionSettledLatch(long currentCount, long deltaCount)
         if (positionSettleSamples >= POSITION_SETTLE_REQUIRED_SAMPLES)
         {
             positionSettledLatch = true;
-            positionIntegral = 0.0f;
-            targetOutputRPM = 0.0f;
-            setMotorCoast();
-
             if (mode == Mode::HOLD && fabsf(targetPositionDeg) < 0.001f)
             {
                 setPersistentHomeValid(true);
             }
-            return true;
         }
     }
     else
@@ -430,7 +402,7 @@ bool updatePositionSettledLatch(long currentCount, long deltaCount)
         positionSettleSamples = 0;
     }
 
-    return false;
+    return positionSettledLatch;
 }
 
 void updateCalibration(long currentCount, long deltaCount, uint32_t now)
@@ -480,60 +452,18 @@ float calculateDirectPositionPWM(
 
     targetOutputRPM = 0.0f;
 
-    if (!useSetupController)
+    // TEST_OUT can coast once it is already inside its setup tolerance so the
+    // state machine can verify that the arm is truly settled before dwell.
+    // This branch is setup-only and never runs for candidate TEST_RETURN.
+    if (useSetupController && fabsf(errorDeg) <= TEST_OFFSET_TOLERANCE_DEG)
     {
-        if (positionDeadbandActive && fabsf(errorDeg) >= POSITION_EXIT_DEADBAND_DEG)
-        {
-            positionDeadbandActive = false;
-        }
-
-        if (
-            !positionDeadbandActive &&
-            fabsf(errorDeg) <= POSITION_DEADBAND_DEG &&
-            fabsf(measuredOutputRPM) <= POSITION_DEADBAND_RPM
-        )
-        {
-            positionDeadbandActive = true;
-        }
-
-        if (positionDeadbandActive)
-        {
-            positionIntegral *= 0.90f;
-            return 0.0f;
-        }
-    }
-    else
-    {
-        positionDeadbandActive = false;
-        if (fabsf(errorDeg) <= TEST_OFFSET_TOLERANCE_DEG)
-        {
-            positionIntegral = 0.0f;
-            return 0.0f;
-        }
+        return 0.0f;
     }
 
-    const bool crossedTarget =
-        previousPositionErrorDeg != 0.0f &&
-        ((errorDeg > 0.0f && previousPositionErrorDeg < 0.0f) ||
-         (errorDeg < 0.0f && previousPositionErrorDeg > 0.0f));
-
-    if (crossedTarget)
+    // Positional PID integral is active across the complete travel range.
+    if (ki <= 0.0f)
     {
         positionIntegral = 0.0f;
-    }
-    previousPositionErrorDeg = errorDeg;
-
-    if (fabsf(errorDeg) > POSITION_I_ENABLE_BAND_DEG || ki <= 0.0f)
-    {
-        if (ki <= 0.0f)
-        {
-            positionIntegral = 0.0f;
-        }
-        else
-        {
-            const float bleed = constrain(POSITION_I_BLEED_PER_SEC * dt, 0.0f, 1.0f);
-            positionIntegral *= (1.0f - bleed);
-        }
     }
     else
     {
@@ -543,67 +473,49 @@ float calculateDirectPositionPWM(
             POSITION_INTEGRAL_LIMIT
         );
 
-        const float proposedIntegralPWM = constrain(
-            ki * proposedIntegral,
-            -POSITION_I_MAX_PWM,
-            POSITION_I_MAX_PWM
-        );
-
         const float proposedPWM =
-            kp * errorDeg + proposedIntegralPWM - kd * outputPositionVelocityDegPerSec;
+            kp * errorDeg + ki * proposedIntegral -
+            kd * outputPositionVelocityDegPerSec;
 
-        const bool insideLimit =
+        const bool insideOutputLimit =
             proposedPWM < maximumReturnPWM && proposedPWM > -maximumReturnPWM;
-        const bool unwindPositive =
+        const bool canUnwindPositiveSaturation =
             proposedPWM >= maximumReturnPWM && errorDeg < 0.0f;
-        const bool unwindNegative =
+        const bool canUnwindNegativeSaturation =
             proposedPWM <= -maximumReturnPWM && errorDeg > 0.0f;
 
-        if (insideLimit || unwindPositive || unwindNegative)
+        if (
+            insideOutputLimit ||
+            canUnwindPositiveSaturation ||
+            canUnwindNegativeSaturation
+        )
         {
             positionIntegral = proposedIntegral;
         }
     }
 
-    const float integralPWM = constrain(
-        ki * positionIntegral,
-        -POSITION_I_MAX_PWM,
-        POSITION_I_MAX_PWM
-    );
-
     float command =
-        kp * errorDeg + integralPWM - kd * outputPositionVelocityDegPerSec;
+        kp * errorDeg +
+        ki * positionIntegral -
+        kd * outputPositionVelocityDegPerSec;
 
     command = constrain(command, -maximumReturnPWM, maximumReturnPWM);
 
-    float effectiveMinimumDrivePWM = minimumDrivePWM;
-
-    if (!useSetupController && minimumDrivePWM > 0.0f)
-    {
-        const float absErrorDeg = fabsf(errorDeg);
-        if (absErrorDeg <= RETURN_MIN_PWM_TAPER_END_DEG)
-        {
-            effectiveMinimumDrivePWM = 0.0f;
-        }
-        else if (absErrorDeg < RETURN_MIN_PWM_TAPER_START_DEG)
-        {
-            const float taper =
-                (absErrorDeg - RETURN_MIN_PWM_TAPER_END_DEG) /
-                (RETURN_MIN_PWM_TAPER_START_DEG - RETURN_MIN_PWM_TAPER_END_DEG);
-            effectiveMinimumDrivePWM = minimumDrivePWM * taper;
-        }
-    }
-
+    // Setup-only breakaway pulse. It is allowed only when the setup controller
+    // is nearly stationary, remains outside setup tolerance, and its own PID
+    // output is below the requested 100 PWM assist level.
     if (
-        effectiveMinimumDrivePWM > 0.0f &&
-        fabsf(errorDeg) > 0.0f &&
-        fabsf(command) > 0.0f &&
-        fabsf(command) < effectiveMinimumDrivePWM
+        useSetupController &&
+        fabsf(errorDeg) > SETUP_ASSIST_MIN_ERROR_DEG &&
+        fabsf(measuredOutputRPM) <= SETUP_ASSIST_MAX_RPM &&
+        fabsf(command) < SETUP_ASSIST_PWM
     )
     {
-        command = command > 0.0f
-            ? effectiveMinimumDrivePWM
-            : -effectiveMinimumDrivePWM;
+        const uint32_t phase = millis() % SETUP_ASSIST_PERIOD_MS;
+        if (phase < SETUP_ASSIST_ON_MS)
+        {
+            command = errorDeg >= 0.0f ? SETUP_ASSIST_PWM : -SETUP_ASSIST_PWM;
+        }
     }
 
     return command;
@@ -680,27 +592,17 @@ void updateTestState(uint32_t now)
     }
     else if (mode == Mode::TEST_RETURN)
     {
-        const bool settledHome =
-            fabsf(positionErrorDeg) <= TEST_HOME_TOLERANCE_DEG &&
-            fabsf(measuredOutputRPM) <= TEST_HOME_TOLERANCE_RPM;
-
-        if (settledHome)
+        // Completion is measurement only. The PID remains untouched while
+        // approaching/entering Home. The worker also verifies 5 stable 100 Hz
+        // HomePad samples and enforces the 5 s experimental deadline.
+        if (positionSettledLatch)
         {
-            if (conditionStartedAt == 0) conditionStartedAt = now;
-            if (now - conditionStartedAt >= TEST_RETURN_SETTLE_MS)
-            {
-                targetPositionDeg = 0.0f;
-                enterMode(Mode::HOLD);
-                setPersistentHomeValid(true);
-                Serial.println("EVENT TEST_COMPLETE");
-            }
+            targetPositionDeg = 0.0f;
+            enterMode(Mode::HOLD);
+            setPersistentHomeValid(true);
+            Serial.println("EVENT TEST_COMPLETE");
         }
-        else
-        {
-            conditionStartedAt = 0;
-        }
-
-        if (now - modeEnteredAt >= TEST_RETURN_TIMEOUT_MS)
+        else if (now - modeEnteredAt >= TEST_RETURN_TIMEOUT_MS)
         {
             targetPositionDeg = 0.0f;
             enterMode(Mode::HOLD);
@@ -935,12 +837,12 @@ void processSerialCommand(char *command)
 
     if (strcmp(key, "MINPWM") == 0)
     {
-        if (!isfinite(value))
+        if (!isfinite(value) || fabsf(value) > 0.0001f)
         {
-            Serial.println("ERR MINPWM_INVALID");
+            Serial.println("ERR MINPWM_DISABLED_FOR_PURE_PID");
             return;
         }
-        minimumDrivePWM = constrain(value, 0.0f, MAX_PWM_COMMAND);
+        minimumDrivePWM = 0.0f;
         Serial.print("ACK MINPWM=");
         Serial.println(minimumDrivePWM, 3);
         return;
@@ -1058,8 +960,7 @@ void readSerialCommands()
 
 void printTelemetry(uint32_t controlTimeMs, long currentCount, float currentPositionDeg)
 {
-    // Compact 100 Hz trace. Short field names keep the stream comfortably
-    // below the 115200-baud link budget while preserving every control sample.
+    // Compact 100 Hz trace:
     // U=controller ms, T=trial, M=mode, H=homed, P=position, G=target,
     // E=position error, X=error counts, R=output RPM, C=encoder count, W=PWM.
     Serial.print("F U="); Serial.print(controlTimeMs);
@@ -1104,7 +1005,7 @@ void setup()
     Serial.println(
         "Commands: IDENTIFY, STATUS, CALIBRATE, ZERO, HOLD, STOP, "
         "KP=<>, KI=<>, KD=<>, SKP=<>, SKI=<>, SKD=<>, MAXPWM=<>, "
-        "HOMEPAD=<pulses>, MINPWM=<>, POS=<>, TEST=<deg>, TRIAL=<>, TELEM=0|1|2"
+        "HOMEPAD=<pulses>, MINPWM=0, POS=<>, TEST=<deg>, TRIAL=<>, TELEM=0|1|2"
     );
 
     if (persistentHomeValid())
@@ -1129,10 +1030,8 @@ void loop()
     const float dt = static_cast<float>(now - previousControlTime) / 1000.0f;
     previousControlTime = now;
 
-    // EncoderCount itself is maintained asynchronously on every A/B edge.
-    // This atomic snapshot is converted to arm position on every 10 ms control
-    // tick, so control and logged FAST position samples share the same 100 Hz
-    // source sample.
+    // Encoder count updates asynchronously on every valid quadrature edge.
+    // Position, velocity, PID and FAST telemetry all use this 100 Hz snapshot.
     const long currentCount = readEncoderAtomic();
     const long deltaCount = currentCount - previousEncoderCount;
     previousEncoderCount = currentCount;
@@ -1165,25 +1064,23 @@ void loop()
     {
         updateTestState(now);
 
-        const bool settledAndMotorOff =
-            updatePositionSettledLatch(currentCount, deltaCount);
+        // Settled state is observed for pass/fail reporting only. It never
+        // suppresses or reshapes the candidate PID output.
+        updatePositionSettledLatch(currentCount, deltaCount);
 
-        if (!settledAndMotorOff)
-        {
-            const bool useSetupController =
-                mode == Mode::TEST_OUT || mode == Mode::TEST_DWELL;
+        const bool useSetupController =
+            mode == Mode::TEST_OUT || mode == Mode::TEST_DWELL;
 
-            const float positionVelocityDegPerSec = measuredOutputRPM * 6.0f;
+        const float positionVelocityDegPerSec = measuredOutputRPM * 6.0f;
 
-            const float desiredPWM = calculateDirectPositionPWM(
-                positionErrorDeg,
-                positionVelocityDegPerSec,
-                dt,
-                useSetupController
-            );
+        const float desiredPWM = calculateDirectPositionPWM(
+            positionErrorDeg,
+            positionVelocityDegPerSec,
+            dt,
+            useSetupController
+        );
 
-            applyClosedLoopMotorCommand(desiredPWM);
-        }
+        applyClosedLoopMotorCommand(desiredPWM);
     }
 
     static uint8_t fastTelemetryDivider = 0;
@@ -1200,10 +1097,9 @@ void loop()
     else if (telemetryMode == TelemetryMode::HUMAN)
     {
         const bool worthShowing =
-            !positionSettledLatch &&
-            (fabsf(positionErrorDeg) >= 0.9f ||
-             fabsf(measuredOutputRPM) >= 1.0f ||
-             fabsf(appliedMotorCommand) >= 1.0f);
+            fabsf(positionErrorDeg) >= 0.1f ||
+            fabsf(measuredOutputRPM) >= 0.5f ||
+            fabsf(appliedMotorCommand) >= 1.0f;
 
         if (worthShowing && ++humanTelemetryDivider >= HUMAN_TELEMETRY_DIVIDER)
         {
