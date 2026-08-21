@@ -1,5 +1,5 @@
 {
-  "profileName": "Direct pure bidirectional PID / v51 three-response BayesOpt / settling-first zero-overshoot objective / duplicate-free 0.001 grid / 300-degree / 5s cutoff",
+  "profileName": "Direct pure bidirectional PID / v51 three-response BayesOpt / 0-3 PID cube / settling-first zero-overshoot objective / duplicate-free 0.001 grid / 300-degree / 5s cutoff",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
@@ -15,9 +15,9 @@
     "kd": 0.1
   },
   "pidRanges": {
-    "kp": [0.0, 50.0],
-    "ki": [0.0, 20.0],
-    "kd": [0.0, 20.0]
+    "kp": [0.0, 3.0],
+    "ki": [0.0, 3.0],
+    "kd": [0.0, 3.0]
   },
   "maxSettlingTimeSeconds": 5.0,
   "pidCoefficientStep": 0.001,
@@ -70,10 +70,10 @@
     "abnormalPenalty": 500.0
   },
   "seedSettings": [
-    [1.35, 0.4, 0.1],
-    [1.0, 0.0, 0],
-    [2.0, 1.0, 1.0],
-    [6.0, 0.2, 0.1]
+    [0.4, 0.4, 0.4],
+    [0.4, 2.6, 2.6],
+    [2.6, 0.4, 2.6],
+    [2.6, 2.6, 0.4]
   ],
   "dataPolicy": {
     "returnDeadlineSeconds": 5.0,
@@ -92,6 +92,7 @@
     "liveJmpTableVisible": true,
     "rawMetricsPreservedInRunCsv": true,
     "homePaddingPolicy": "target remains exactly Home=0; home padding is a symmetric encoder-count acceptance window after the mechanism stops",
+    "seedDesignPolicy": "four-point near-corner tetrahedral design at 0.4/2.6 to maximize initial 3-D coverage while avoiding a zero-Kp no-motion seed",
     "failedTrialThreeResponsePolicy": "non-COMPLETE rows are modeled as Settling=5.0 s, Overshoot=10 deg, Oscillations=3 so failures cannot appear desirable",
     "responseTransforms": {
       "pwmChatter": {
