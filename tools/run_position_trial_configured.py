@@ -124,30 +124,40 @@ def quantize_pid(a) -> None:
 
 
 def enforce_hard_settling_deadline() -> None:
-    """Make the return deadline apply until the run actually completes.
-
-    The legacy worker disabled its deadline after the first sample that merely
-    entered HomePad. That allowed a run to continue after a brief pass through
-    the acceptance window. Replace that condition so the deadline remains
-    active until EVENT TEST_COMPLETE terminates the run.
-    """
+    """Patch the legacy worker for the current configured runtime behavior."""
     source = inspect.getsource(worker.main)
-    old = (
+
+    old_timeout = (
         "return_start is not None and not settling_reached\n"
         "                and now - return_start >= a.max_settling_seconds"
     )
-    new = (
+    new_timeout = (
         "return_start is not None\n"
         "                and now - return_start >= a.max_settling_seconds"
     )
-    if source.count(old) != 1:
+    if source.count(old_timeout) != 1:
         raise RuntimeError(
             "Could not patch legacy worker hard-settling deadline safely; "
             "expected timeout condition was not found exactly once"
         )
 
+    # At 100 Hz, echoing every compact sample to the PowerShell/JMP console can
+    # become the bottleneck. Keep every row for metrics/CSV, but print events,
+    # acknowledgements, STATUS, and errors only.
+    old_print = '            print(line, flush=True)'
+    new_print = (
+        '            if not line.startswith("F "):\n'
+        '                print(line, flush=True)'
+    )
+    if source.count(old_print) != 1:
+        raise RuntimeError(
+            "Could not patch legacy worker 100 Hz console throttle safely; "
+            "expected serial print statement was not found exactly once"
+        )
+
     namespace: dict = {}
-    patched = source.replace(old, new, 1)
+    patched = source.replace(old_timeout, new_timeout, 1)
+    patched = patched.replace(old_print, new_print, 1)
     exec(compile(patched, worker.__file__, "exec"), worker.__dict__, namespace)
     worker.main = namespace["main"]
 
