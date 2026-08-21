@@ -137,6 +137,12 @@ def main() -> int:
     text = replace_required(text, 'kiHigh = 500.0;', f'kiHigh = {ki_high:.1f};', "Ki high")
     text = replace_required(text, 'kdLow = 0.0;', f'kdLow = {kd_low:.1f};', "Kd low")
     text = replace_required(text, 'kdHigh = 200.0;', f'kdHigh = {kd_high:.1f};', "Kd high")
+    text = replace_required(
+        text,
+        'maxSettlingTimeSeconds = 3.0;',
+        f'maxSettlingTimeSeconds = {max_settle:.1f};',
+        "maximum settling time",
+    )
 
     seed_lines = ["seedSettings = {"]
     for index, (kp, ki, kd) in enumerate(config["seedSettings"]):
@@ -389,6 +395,7 @@ def main() -> int:
         f"kiHigh = {ki_high:.1f};",
         f"kdLow = {kd_low:.1f};",
         f"kdHigh = {kd_high:.1f};",
+        f"maxSettlingTimeSeconds = {max_settle:.1f};",
         f"Minimum RSquare( {minimum_rsquare:.2f} )",
         "THREE-RESPONSE BAYESOPT DESIRABILITY",
         "JMP models/profilers plot only these three responses",
