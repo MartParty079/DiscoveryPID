@@ -1,12 +1,12 @@
 {
-  "profileName": "Direct pure positional PID / v52 home-reach BayesOpt / 0-3 PID cube / fixed outbound setup / 0.001 grid / 300-degree / 5s cutoff",
+  "profileName": "Pure positional PID / v53 verified-firmware HomeReach BayesOpt / 0-3 PID cube / fixed outbound setup / 0.001 grid / 300-degree / 5s cutoff",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
   "defaultPort": "COM7",
-  "firmwareId": "DiscoveryPID direct-position-pid-v3.8-final-approach 2026-08-20",
-  "studyName": "PositionStudy_DirectPID_v52_HomeReach_300Deg",
-  "dataRoot": "position_autotune_directpid_v52_home_reach",
+  "firmwareId": "DiscoveryPID pure-positional-pid-v4.0 2026-08-21",
+  "studyName": "PositionStudy_DirectPID_v53_PurePID_HomeReach_300Deg",
+  "dataRoot": "position_autotune_directpid_v53_pure_pid_home_reach",
   "testOffsetDeg": 300.0,
   "minimumDrivePWM": 0.0,
   "defaultPID": {
@@ -77,10 +77,10 @@
     "abnormalPenalty": 500.0
   },
   "seedSettings": [
-    [0.4, 0.4, 0.4],
-    [0.4, 2.6, 2.6],
-    [2.6, 0.4, 2.6],
-    [2.6, 2.6, 0.4]
+    [1.844, 2.008, 0.230],
+    [1.650, 1.700, 0.100],
+    [2.050, 2.300, 0.400],
+    [2.560, 0.217, 2.610]
   ],
   "dataPolicy": {
     "returnDeadlineSeconds": 5.0,
@@ -97,7 +97,8 @@
     "homePaddingPolicy": "PID target remains exactly Home=0; HomePad is measurement/pass tolerance only and never changes candidate PID output",
     "fixedSetupPolicy": "every outbound 300-degree setup and post-trial recovery uses fixedSetupPID 1.35/0.4/0.1; setup-only 100-PWM breakaway pulses may assist a stalled setup; only candidate Kp Ki Kd vary in Bayesian Optimization",
     "candidateControlPolicy": "pure positional PID at 100 Hz: u=Kp*error+Ki*integral-Kd*measured_position_velocity; no minimum PWM floor, no near-home taper, no deadband, no integral enable band, no integral bleed, no separate integral-output cap, and no coast-on-settle override during TEST_RETURN",
-    "seedDesignPolicy": "four-point near-corner tetrahedral design at 0.4/2.6 for initial 3-D coverage",
+    "firmwareTraceabilityPolicy": "every v53 physical trial must identify as DiscoveryPID pure-positional-pid-v4.0 2026-08-21; stale v3.8 firmware is rejected before motion",
+    "seedDesignPolicy": "four seeds use the prior v52 fastest observed basin around 1.844/2.008/0.230, two local bracketing points, and one robust high-D completion basin around 2.56/0.217/2.61; v53 recollects them under verified pure-PID firmware",
     "failedTrialPolicy": "preserve measured Home Shortfall and Overshoot; unsuccessful returns receive Settling=5.0 s rather than identical synthetic response triples",
     "missingHomeEntryRpmResponse": 10.0,
     "multiResponseRowsRemainNumeric": true,
