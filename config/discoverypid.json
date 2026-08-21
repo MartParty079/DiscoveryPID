@@ -1,5 +1,5 @@
 {
-  "profileName": "Direct pure bidirectional PID / v52 home-reach BayesOpt / 0-3 PID cube / fixed outbound setup / 0.001 grid / 300-degree / 5s cutoff",
+  "profileName": "Direct pure positional PID / v52 home-reach BayesOpt / 0-3 PID cube / fixed outbound setup / 0.001 grid / 300-degree / 5s cutoff",
   "latestBranch": "main",
   "latestRemote": "origin",
   "defaultRemote": "origin",
@@ -15,9 +15,18 @@
     "kd": 0.1
   },
   "fixedSetupPID": {
-    "kp": 50.0,
-    "ki": 0.0,
-    "kd": 1.0
+    "kp": 1.35,
+    "ki": 0.4,
+    "kd": 0.1
+  },
+  "setupAssist": {
+    "enabled": true,
+    "pwm": 100.0,
+    "pulseOnMilliseconds": 50,
+    "pulsePeriodMilliseconds": 250,
+    "maximumAssistRpm": 1.0,
+    "minimumErrorDeg": 1.5,
+    "purpose": "setup-only breakaway bumps when the fixed setup PID is stalled; never active during candidate TEST_RETURN"
   },
   "pidRanges": {
     "kp": [0.0, 3.0],
@@ -85,8 +94,9 @@
     "homeReachedPolicy": "Home Reached=1 if any 100 Hz return sample enters HomePad or consecutive samples cross exact Home; otherwise 0",
     "homeShortfallPolicy": "Home Shortfall is 0 when Home is reached; otherwise it is the closest absolute position error observed during the five-second return",
     "settlingTimePolicy": "Settling Time ends only after five consecutive 100 Hz samples are stationary inside HomePad; unsuccessful returns are 5.0 s",
-    "homePaddingPolicy": "PID target remains exactly Home=0; HomePad is only the symmetric encoder-count acceptance window after the arm stops",
-    "fixedSetupPolicy": "every outbound 300-degree setup and post-trial recovery uses fixedSetupPID; only candidate Kp Ki Kd vary in Bayesian Optimization",
+    "homePaddingPolicy": "PID target remains exactly Home=0; HomePad is measurement/pass tolerance only and never changes candidate PID output",
+    "fixedSetupPolicy": "every outbound 300-degree setup and post-trial recovery uses fixedSetupPID 1.35/0.4/0.1; setup-only 100-PWM breakaway pulses may assist a stalled setup; only candidate Kp Ki Kd vary in Bayesian Optimization",
+    "candidateControlPolicy": "pure positional PID at 100 Hz: u=Kp*error+Ki*integral-Kd*measured_position_velocity; no minimum PWM floor, no near-home taper, no deadband, no integral enable band, no integral bleed, no separate integral-output cap, and no coast-on-settle override during TEST_RETURN",
     "seedDesignPolicy": "four-point near-corner tetrahedral design at 0.4/2.6 for initial 3-D coverage",
     "failedTrialPolicy": "preserve measured Home Shortfall and Overshoot; unsuccessful returns receive Settling=5.0 s rather than identical synthetic response triples",
     "missingHomeEntryRpmResponse": 10.0,
@@ -113,16 +123,20 @@
     }
   },
   "returnSmoothing": {
-    "minimumPwmTaperStartDeg": 8.0,
-    "minimumPwmTaperEndDeg": 3.0,
-    "integralEnableBandDeg": 2.0,
-    "maximumIntegralContributionPWM": 12.0,
+    "enabled": false,
+    "minimumPwmTaperStartDeg": 0.0,
+    "minimumPwmTaperEndDeg": 0.0,
+    "integralEnableBandDeg": 1000000.0,
+    "maximumIntegralContributionPWM": 225.0,
     "outputRpmFilterAlpha": 0.15,
     "fastTelemetryHz": 100,
     "pidGeneratedBidirectionalBraking": true,
     "zeroCommandHardwareBrake": false,
     "zeroCommandBehavior": "coast",
     "coastBeforeReverse": false,
-    "controlLoopHz": 100
+    "controlLoopHz": 100,
+    "controllerForm": "positional PID",
+    "nearHomeModifiers": false,
+    "minimumPwmFloor": 0.0
   }
 }
