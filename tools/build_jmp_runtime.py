@@ -85,11 +85,11 @@ def main() -> int:
     minimum_rsquare = float(bo_config["minimumRSquare"])
     responses = bo_config["responses"]
     response_names = [str(response["name"]) for response in responses]
-    expected = ["Home Shortfall (deg)", "Settling Time (s)", "Overshoot (deg)"]
+    expected = ["Settling Time (s)", "Overshoot (deg)"]
     if response_names != expected:
         raise RuntimeError(
             "Current JMP study requires exactly these responses in order: "
-            "Home Shortfall (deg), Settling Time (s), Overshoot (deg)"
+            "Settling Time (s), Overshoot (deg)"
         )
     response_label = ", ".join(response_names)
 
@@ -163,8 +163,7 @@ def main() -> int:
         "seed design",
     )
 
-    # Make outbound positioning deterministic. The candidate PID controls only
-    # TEST_RETURN; every setup move uses the same fixed strong PID.
+    # Fixed outbound setup. Candidate PID controls only TEST_RETURN.
     setup_replacement = f'''resolveSetupPID =
 Function( {{dt, fallbackKp, fallbackKi, fallbackKd}},
     Eval List(
@@ -185,7 +184,7 @@ confirmPhysicalRun ='''
         "fixed setup PID",
     )
 
-    # Add Home reach/shortfall plus diagnostics to the live table.
+    # Add diagnostics to the live table. Home Shortfall is intentionally omitted.
     old_columns = '''        New Column(
             "Oscillations",
             Numeric,
@@ -207,13 +206,6 @@ confirmPhysicalRun ='''
             Numeric,
             Nominal,
             Format( "Best", 12 )
-        ),
-
-        New Column(
-            "Home Shortfall (deg)",
-            Numeric,
-            Continuous,
-            Format( "Fixed Dec", 12, 6 )
         ),
 
         New Column(
@@ -253,7 +245,7 @@ confirmPhysicalRun ='''
 
         New Column(
             "IAE (deg*s)",'''
-    text = replace_required(text, old_columns, new_columns, "home-reach columns")
+    text = replace_required(text, old_columns, new_columns, "two-response diagnostic columns")
 
     old_limits = '''    // Safe here because Score was just created explicitly as Numeric.
     Column( dt, "Score" ) <<
@@ -276,19 +268,19 @@ confirmPhysicalRun ='''
             {{Goal( Minimize ), Importance( 1 ), Show Limits( 0 )}}
         );
 
-    // THREE-RESPONSE HOME-REACH BAYESOPT.
-    // Priority: reach Home, settle quickly, then suppress overshoot.
+    // TWO-RESPONSE PURE-PID BAYESOPT.
+    // JMP models only settling time and overshoot.
 {response_blocks}
 
     dt;
 );'''
     text = replace_required(text, old_limits, new_limits, "response desirability")
 
-    # Export the new metrics in the session CSV.
+    # Export diagnostics without Home Shortfall.
     text = replace_required(
         text,
         '            "Score,Settling Time (s),Overshoot (deg),Oscillations,IAE (deg*s)," ||',
-        '            "Score,Home Reached,Home Shortfall (deg),Settling Time (s),Overshoot (deg),Raw Overshoot (deg),Oscillations,PWM Chatter,Raw PWM Chatter,Home Entry RPM,Return Failure,IAE (deg*s)," ||',
+        '            "Score,Home Reached,Settling Time (s),Overshoot (deg),Raw Overshoot (deg),Oscillations,PWM Chatter,Raw PWM Chatter,Home Entry RPM,Return Failure,IAE (deg*s)," ||',
         "compact CSV header",
     )
     text = replace_required(
@@ -300,7 +292,6 @@ confirmPhysicalRun ='''
                 Char( Column( dt, "IAE (deg*s)" )[rowIndex] ) || "," ||''',
         '''                Char( scoreValue ) || "," ||
                 Char( Column( dt, "Home Reached" )[rowIndex] ) || "," ||
-                Char( Column( dt, "Home Shortfall (deg)" )[rowIndex] ) || "," ||
                 Char( Column( dt, "Settling Time (s)" )[rowIndex] ) || "," ||
                 Char( Column( dt, "Overshoot (deg)" )[rowIndex] ) || "," ||
                 Char( Column( dt, "Raw Overshoot (deg)" )[rowIndex] ) || "," ||
@@ -313,7 +304,8 @@ confirmPhysicalRun ='''
         "compact CSV response values",
     )
 
-    # Result CSV -> JSL resultList mapping.
+    # Keep the worker's internal Home Shortfall field hidden from JMP; retaining
+    # its result-list slot avoids changing the physical worker/result schema here.
     old_result_list = '''            asNumber( Column( resultDT, "Settling Time (s)" )[1] ),
             asNumber( Column( resultDT, "Return Timer Started" )[1] ),
             asNumber( Column( resultDT, "Overshoot (deg)" )[1] ),
@@ -338,14 +330,13 @@ confirmPhysicalRun ='''
             asNumber( Column( resultDT, "Success" )[1] ),
             statusText,
             asNumber( Column( resultDT, "Samples" )[1] )'''
-    text = replace_required(text, old_result_list, new_result_list, "result-list home metrics")
+    text = replace_required(text, old_result_list, new_result_list, "result-list metrics")
 
-    # Replace the legacy first-entry warning with the actual current definition.
     warning_replacement = '''    // ---------------------------------------------------------------
     // RELEASE-TO-HOME MEASUREMENT
-    // Home Reached: ever enters HomePad or crosses exact Home.
-    // Home Shortfall: closest error if Home is never reached.
     // Settling Time: stable stationary HomePad completion; failures = cutoff.
+    // Overshoot: measured travel beyond Home.
+    // Home Reached remains diagnostic only.
     // ---------------------------------------------------------------
     If(
         resultList[5] != 1 |
@@ -358,10 +349,10 @@ confirmPhysicalRun ='''
                 Text Box(
                     "Status: " || resultList[14] ||
                     "\!NHome Reached: " || Char( resultList[2] ) ||
-                    "\!NHome Shortfall: " || Char( resultList[3] ) || " deg" ||
                     "\!NSettling Time: " || Char( resultList[4] ) || " s" ||
+                    "\!NOvershoot: " || Char( resultList[6] ) || " deg" ||
                     "\!NReturn samples: " || Char( resultList[15] ) ||
-                    "\!N\!NThe measured row is retained so BayesOpt can learn from how close a stalled return got."
+                    "\!N\!NJMP models only Settling Time and Overshoot."
                 ),
                 Button Box(
                     "Dismiss",
@@ -377,7 +368,7 @@ confirmPhysicalRun ='''
         text,
         r'    // ---------------------------------------------------------------\n    // RELEASE-TO-HOME MEASUREMENT WARNING.*?\n    resultList;\n\);',
         warning_replacement,
-        "home-reach trial warning",
+        "two-response trial warning",
     )
 
     old_save = '''    Column( dt, "Score" )[rowIndex] = resultList[1];
@@ -393,7 +384,6 @@ confirmPhysicalRun ='''
     saveSnapshot( dt );'''
     new_save = f'''    Column( dt, "Score" )[rowIndex] = resultList[1];
     Column( dt, "Home Reached" )[rowIndex] = resultList[2];
-    Column( dt, "Home Shortfall (deg)" )[rowIndex] = Max( 0.0, resultList[3] );
     Column( dt, "Settling Time (s)" )[rowIndex] = resultList[4];
     Column( dt, "Raw Overshoot (deg)" )[rowIndex] = resultList[6];
     Column( dt, "Overshoot (deg)" )[rowIndex] =
@@ -414,9 +404,9 @@ confirmPhysicalRun ='''
 
     saveSnapshot( dt );
     dt << Bring Window To Front;'''
-    text = replace_required(text, old_save, new_save, "save home-reach metrics")
+    text = replace_required(text, old_save, new_save, "save two-response metrics")
 
-    # JMP Y list: only shortfall, settling, overshoot.
+    # JMP Y list: settling time and overshoot only.
     y_lines = []
     for index, name in enumerate(response_names):
         comma = "," if index < len(response_names) - 1 else ""
@@ -460,13 +450,13 @@ confirmPhysicalRun ='''
     text = replace_required(
         text,
         '                "Study: " ||\n                studyName ||\n                "\\!NSession: " || sessionName ||\n                "\\!N\\!N" ||',
-        '                "Study: " ||\n                studyName ||\n                "\\!NSession: " || sessionName ||\n                "\\!NBayesOpt mode: HOME-REACH THREE-RESPONSE DESIRABILITY\\!N" ||\n                "Responses: Home Shortfall (deg), Settling Time (s), Overshoot (deg)\\!N" ||\n                "Objective: reach Home first, then minimize stable settling time and overshoot\\!N" ||\n                "Outbound setup PID is fixed; only candidate Kp/Ki/Kd vary\\!N\\!N" ||',
+        '                "Study: " ||\n                studyName ||\n                "\\!NSession: " || sessionName ||\n                "\\!NBayesOpt mode: TWO-RESPONSE PURE-PID DESIRABILITY\\!N" ||\n                "Responses: Settling Time (s), Overshoot (deg)\\!N" ||\n                "Objective: minimize stable settling time and overshoot\\!N" ||\n                "Home Reached is diagnostic only; Home Shortfall is not in JMP\\!N" ||\n                "Outbound setup PID is fixed; only candidate Kp/Ki/Kd vary\\!N\\!N" ||',
         "startup response banner",
     )
     text = replace_required(
         text,
         '                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s\\!N" ||',
-        f'                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s HARD CUTOFF\\!N" ||\n                "Home Shortfall preserves distance-to-home information from stalled runs\\!N" ||\n                "Fixed setup PID: Kp={setup_kp:g} Ki={setup_ki:g} Kd={setup_kd:g}\\!N" ||\n                "BayesOpt model gate: minimum R-square {minimum_rsquare:.2f}\\!N" ||\n                "PID coefficient rounding: nearest {pid_step_jsl}\\!N" ||',
+        f'                "Maximum settling time: " || Char( maxSettlingTimeSeconds ) || " s HARD CUTOFF\\!N" ||\n                "Fixed setup PID: Kp={setup_kp:g} Ki={setup_ki:g} Kd={setup_kd:g}\\!N" ||\n                "BayesOpt model gate: minimum R-square {minimum_rsquare:.2f}\\!N" ||\n                "PID coefficient rounding: nearest {pid_step_jsl}\\!N" ||',
         "startup timeout/model description",
     )
 
@@ -490,13 +480,11 @@ confirmPhysicalRun ='''
         f"kdHigh = {kd_high:.1f};",
         f"maxSettlingTimeSeconds = {max_settle:.1f};",
         f"Minimum RSquare( {minimum_rsquare:.2f} )",
-        "THREE-RESPONSE HOME-REACH BAYESOPT",
-        "Home Shortfall (deg)",
+        "TWO-RESPONSE PURE-PID BAYESOPT",
         "Home Reached",
         *response_refs,
         'Column( dt, "Raw PWM Chatter" )[rowIndex]',
         'Column( dt, "Raw Overshoot (deg)" )[rowIndex]',
-        'Column( dt, "Home Shortfall (deg)" )[rowIndex]',
         'Column( dt, "Return Failure" )[rowIndex]',
         'dt << Bring Window To Front;',
         '"--max-settling-seconds", Char( maxSettlingTimeSeconds )',
@@ -512,15 +500,18 @@ confirmPhysicalRun ='''
         raise RuntimeError(f"Runtime JSL validation failed; missing: {missing}")
     if 'Y( :Score )' in text:
         raise RuntimeError("Runtime JSL validation failed: scalar Score is still BayesOpt Y")
+    if ':Name( "Home Shortfall (deg)" )' in text:
+        raise RuntimeError("Runtime JSL validation failed: Home Shortfall is still a BayesOpt response")
     if multi_y not in text:
-        raise RuntimeError("Runtime JSL validation failed: configured home-reach Y block missing")
+        raise RuntimeError("Runtime JSL validation failed: configured two-response Y block missing")
 
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(text, encoding="utf-8", newline="\n")
     print(f"Built validated runtime JSL: {a.output}")
-    print("BayesOpt: HOME-REACH three-response desirability")
+    print("BayesOpt: TWO-RESPONSE pure-PID desirability")
     print(f"Responses: {response_label}")
-    print("Objective: reach Home first, then settle as quickly as possible without overshoot")
+    print("Objective: minimize settling time and overshoot")
+    print("Home Reached remains diagnostic only; Home Shortfall is excluded from JMP")
     print(f"Fixed outbound/recovery PID: Kp={setup_kp:g}, Ki={setup_ki:g}, Kd={setup_kd:g}")
     print(f"PID range: Kp {kp_low:g}-{kp_high:g}, Ki {ki_low:g}-{ki_high:g}, Kd {kd_low:g}-{kd_high:g}")
     print(f"PID coefficient rounding: nearest {pid_step:g}")
