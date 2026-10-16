@@ -12,8 +12,8 @@ constexpr byte M2 = 10; // Motor driver input for positive motion; PWM-capable p
 // CHANGE for a different encoder or gearbox. This calculation assumes the
 // encoder measures the motor shaft, before the gearbox. Both edges of both
 // channels are counted: use decoded counts/revolution, not an unconverted PPR.
-constexpr float ENCODER_COUNTS_PER_REV = 56.0f;
-constexpr float GEAR_RATIO = 30613.0f / 1500.0f; // Motor turns per output turn.
+constexpr float ENCODER_COUNTS_PER_REV = 28.0f; // 7 cycles × 4 quadrature counts.
+constexpr float GEAR_RATIO = 380.0f;           // Motor turns per output turn.
 constexpr float DEG = 360.0f / (ENCODER_COUNTS_PER_REV * GEAR_RATIO);
 // DEG converts one encoder count into degrees at the controlled output shaft.
 // If the encoder is on the output shaft, use its counts/rev and a ratio of 1.
