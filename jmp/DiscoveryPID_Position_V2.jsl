@@ -1,53 +1,122 @@
+// Tune positional PID gains using measured settling time and overshoot.
 Names Default To Here(1);
 
-port="COM7";
-root="C:/Users/mkime/Documents/GITHUB/PID Discovery/DiscoveryPID/";
-python="C:/Users/mkime/.platformio/penv/Scripts/python.exe";
-worker=root||"tools/run_position_trial.py";
-seeds={{1.844,2.008,.230},{1.650,1.700,.100},{2.050,2.300,.400},{2.560,.217,2.610}};
-maxRuns=50;
+// --- Connection and trial settings ---
+// Update these paths and the serial port for the local machine.
+port = "COM7";
+root = "C:/Users/mkime/Documents/GITHUB/PID Discovery/DiscoveryPID/";
+python = "C:/Users/mkime/.platformio/penv/Scripts/python.exe";
+worker = root || "tools/run_position_trial.py";
 
-q=Function({x},"\!""||Char(x)||"\!"");
-run=Function({p,i,d},{o,w},
-  o=Run Program(Executable(python),Options({q(worker),q(port),Char(p),Char(i),Char(d)}),Read Function("text"));
-  w=Words(Trim(o),",");
-  Eval List({Num(w[1]),Num(w[2])});
+// Initial gain combinations, in {KP, KI, KD} order.
+seeds = {
+    {1.844, 2.008, .230},
+    {1.650, 1.700, .100},
+    {2.050, 2.300, .400},
+    {2.560, .217, 2.610}
+};
+maxRuns = 50; // Total trial budget, including the seed trials.
+
+// --- Python trial bridge ---
+// Wrap an argument in double quotes to preserve paths containing spaces.
+q = Function({x}, "\!"" || Char(x) || "\!"");
+
+// Run one hardware trial and parse Python's "settling_time,overshoot" output.
+// The worker handles serial communication and recovery to Home.
+run = Function({p, i, d}, {o, w},
+    o = Run Program(
+        Executable(python),
+        Options({q(worker), q(port), Char(p), Char(i), Char(d)}),
+        Read Function("text")
+    );
+    w = Words(Trim(o), ",");
+    Eval List({Num(w[1]), Num(w[2])});
 );
 
-dt=New Table("Barebones PID BayesOpt",
-  New Column("Run",Numeric,Ordinal),
-  New Column("Iteration",Numeric,Ordinal),
-  New Column("KP",Numeric,Continuous),
-  New Column("KI",Numeric,Continuous),
-  New Column("KD",Numeric,Continuous),
-  New Column("Settling Time (s)",Numeric,Continuous),
-  New Column("Overshoot (deg)",Numeric,Continuous)
-);
-For Each({c},{"KP","KI","KD"},
-  Column(dt,c)<<Set Property("Design Role",DesignRole(Continuous));
-  Column(dt,c)<<Set Property("Coding",{0,3});
-);
-Column(dt,"Settling Time (s)")<<Set Property("Response Limits",{Lower(.6,1),Middle(1,.8),Upper(5,.001),Goal(Minimize),Importance(10)});
-Column(dt,"Overshoot (deg)")<<Set Property("Response Limits",{Lower(0,1),Middle(30,.2),Upper(300,.001),Goal(Minimize),Importance(6)});
-
-For(i=1,i<=N Items(seeds),i++,
-  r=run(seeds[i][1],seeds[i][2],seeds[i][3]);dt<<Add Rows(1);n=N Rows(dt);
-  Column(dt,"Run")[n]=n;Column(dt,"Iteration")[n]=0;
-  Column(dt,"KP")[n]=seeds[i][1];Column(dt,"KI")[n]=seeds[i][2];Column(dt,"KD")[n]=seeds[i][3];
-  Column(dt,"Settling Time (s)")[n]=r[1];Column(dt,"Overshoot (deg)")[n]=r[2];
+// --- Results table and optimization objectives ---
+dt = New Table("Barebones PID BayesOpt",
+    New Column("Run", Numeric, Ordinal),
+    New Column("Iteration", Numeric, Ordinal),
+    New Column("KP", Numeric, Continuous),
+    New Column("KI", Numeric, Continuous),
+    New Column("KD", Numeric, Continuous),
+    New Column("Settling Time (s)", Numeric, Continuous),
+    New Column("Overshoot (deg)", Numeric, Continuous)
 );
 
-For(iter=1,iter<=maxRuns-N Items(seeds),iter++,
-  before=N Rows(dt);
-  bo=dt<<Bayesian Optimization(
-    Y(:Name("Settling Time (s)"),:Name("Overshoot (deg)")),
-    X(:KP,:KI,:KD),Iteration(:Iteration),Run Order(:Run),
-    Generate Candidate Set(Candidate Set Size(4000)),
-    Autoselect Batch(Batch Size(1),Minimum RSquare(.10)),
-    Make Table Options(Location(1),Randomize Runs(0))
-  );
-  bo<<Make Table;Wait(.2);n=N Rows(dt);If(n<=before,Break());
-  p=Round(Column(dt,"KP")[n]*1000)/1000;i=Round(Column(dt,"KI")[n]*1000)/1000;d=Round(Column(dt,"KD")[n]*1000)/1000;
-  Column(dt,"KP")[n]=p;Column(dt,"KI")[n]=i;Column(dt,"KD")[n]=d;Column(dt,"Run")[n]=n;Column(dt,"Iteration")[n]=iter;
-  r=run(p,i,d);Column(dt,"Settling Time (s)")[n]=r[1];Column(dt,"Overshoot (deg)")[n]=r[2];
+// Treat all three gains as continuous factors over the 0-3 range.
+For Each({c}, {"KP", "KI", "KD"},
+    Column(dt, c) << Set Property("Design Role", DesignRole(Continuous));
+    Column(dt, c) << Set Property("Coding", {0, 3});
+);
+
+// Desirability settings favor smaller responses, with more weight on settling.
+Column(dt, "Settling Time (s)") << Set Property("Response Limits", {
+    Lower(.6, 1),
+    Middle(1, .8),
+    Upper(5, .001),
+    Goal(Minimize),
+    Importance(10)
+});
+Column(dt, "Overshoot (deg)") << Set Property("Response Limits", {
+    Lower(0, 1),
+    Middle(30, .2),
+    Upper(300, .001),
+    Goal(Minimize),
+    Importance(6)
+});
+
+// --- Seed trials ---
+// Measure the initial combinations before requesting new candidates.
+// Iteration 0 identifies these seed measurements in the results table.
+For(i = 1, i <= N Items(seeds), i++,
+    r = run(seeds[i][1], seeds[i][2], seeds[i][3]);
+    dt << Add Rows(1);
+    n = N Rows(dt);
+
+    Column(dt, "Run")[n] = n;
+    Column(dt, "Iteration")[n] = 0;
+    Column(dt, "KP")[n] = seeds[i][1];
+    Column(dt, "KI")[n] = seeds[i][2];
+    Column(dt, "KD")[n] = seeds[i][3];
+    Column(dt, "Settling Time (s)")[n] = r[1];
+    Column(dt, "Overshoot (deg)")[n] = r[2];
+);
+
+// --- Sequential Bayesian optimization ---
+// Request and measure one candidate at a time using the accumulated results.
+For(iter = 1, iter <= maxRuns - N Items(seeds), iter++,
+    before = N Rows(dt);
+    bo = dt << Bayesian Optimization(
+        Y(:Name("Settling Time (s)"), :Name("Overshoot (deg)")),
+        X(:KP, :KI, :KD),
+        Iteration(:Iteration),
+        Run Order(:Run),
+        Generate Candidate Set(Candidate Set Size(4000)),
+        Autoselect Batch(Batch Size(1), Minimum RSquare(.10)),
+        Make Table Options(Location(1), Randomize Runs(0))
+    );
+
+    // Append the candidate and allow JMP time to update the table.
+    // Stop if no new row was added.
+    bo << Make Table;
+    Wait(.2);
+    n = N Rows(dt);
+    If(n <= before, Break());
+
+    // Match the worker's three-decimal gain precision and record tested gains.
+    p = Round(Column(dt, "KP")[n] * 1000) / 1000;
+    i = Round(Column(dt, "KI")[n] * 1000) / 1000;
+    d = Round(Column(dt, "KD")[n] * 1000) / 1000;
+
+    Column(dt, "KP")[n] = p;
+    Column(dt, "KI")[n] = i;
+    Column(dt, "KD")[n] = d;
+    Column(dt, "Run")[n] = n;
+    Column(dt, "Iteration")[n] = iter;
+
+    // Store both measured responses for the next optimization iteration.
+    r = run(p, i, d);
+    Column(dt, "Settling Time (s)")[n] = r[1];
+    Column(dt, "Overshoot (deg)")[n] = r[2];
 );
