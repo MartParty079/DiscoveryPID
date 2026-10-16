@@ -6,7 +6,7 @@ Names Default To Here(1);
 port = "COM3";
 root = "C:\Users\vgolf\Documents\DiscoveryPID\DiscoveryPID";
 python = "C:\Users\vgolf\.platformio\penv\Scripts\python.exe";
-worker = root || "tools\run_position_trial.py";
+worker = root || "\tools\run_position_trial.py";
 
 // Initial gain combinations, in {KP, KI, KD} order.
 seeds = {
@@ -31,7 +31,7 @@ run = Function({p, i, d}, {o, w},
     );
     w = Words(Trim(o), ",");
     
-//    show(w);
+//    show(o);
 //    show(nitems(w));
 
     Eval List({Num(w[1]), Num(w[2])});
