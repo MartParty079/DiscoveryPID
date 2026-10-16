@@ -7,7 +7,7 @@ worker=root||"tools/run_position_trial.py";
 seeds={{1.844,2.008,.230},{1.650,1.700,.100},{2.050,2.300,.400},{2.560,.217,2.610}};
 maxRuns=50;
 
-q=Function({x},"\!\""||Char(x)||"\!\"");
+q=Function({x},"\!""||Char(x)||"\!"");
 run=Function({p,i,d},{o,w},
   o=Run Program(Executable(python),Options({q(worker),q(port),Char(p),Char(i),Char(d)}),Read Function("text"));
   w=Words(Trim(o),",");
