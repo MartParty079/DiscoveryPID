@@ -96,20 +96,24 @@ For(i = 1, i <= N Items(seeds), i++,
 For(iter = 1, iter <= maxRuns - N Items(seeds), iter++,
     before = N Rows(dt);
     bo = dt << Bayesian Optimization(
-        Y(:Name("Settling Time (s)"), :Name("Overshoot (deg)")),
+//        Y(:Name("Settling Time (s)"), :Name("Overshoot (deg)")),
+		Y( :"Settling Time (s)"n, :"Overshoot (deg)"n ),
         X(:KP, :KI, :KD),
         Iteration(:Iteration),
         Run Order(:Run),
-        Generate Candidate Set(Candidate Set Size(4000)),
+        Generate Candidate Set(Candidate Set Size(3000)),
         Autoselect Batch(Batch Size(1), Minimum RSquare(.10)),
         Make Table Options(Location(1), Randomize Runs(0))
     );
 
     // Append the candidate and allow JMP time to update the table.
     // Stop if no new row was added.
+    show(7);
     bo << Make Table;
-    Wait(.2);
+    show(8);
+    Wait(0);
     n = N Rows(dt);
+    show(9);
     If(n <= before, Break());
 
     // Match the worker's three-decimal gain precision and record tested gains.
