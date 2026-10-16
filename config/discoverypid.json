@@ -1,0 +1,137 @@
+{
+  "profileName": "Pure positional PID / v55 settling+overshoot BayesOpt / 0-3 PID cube / 0-300 overshoot learning / fixed outbound setup / 0.001 grid / 300-degree / 5s cutoff",
+  "latestBranch": "main",
+  "latestRemote": "origin",
+  "defaultRemote": "origin",
+  "defaultPort": "COM7",
+  "firmwareId": "DiscoveryPID pure-positional-pid-v4.0 2026-08-21",
+  "studyName": "PositionStudy_DirectPID_v55_PurePID_SettleOvershoot300_300Deg",
+  "dataRoot": "position_autotune_directpid_v55_pure_pid_settle_overshoot300",
+  "testOffsetDeg": 300.0,
+  "minimumDrivePWM": 0.0,
+  "defaultPID": {
+    "kp": 1.35,
+    "ki": 0.4,
+    "kd": 0.1
+  },
+  "fixedSetupPID": {
+    "kp": 1.35,
+    "ki": 0.4,
+    "kd": 0.1
+  },
+  "setupAssist": {
+    "enabled": true,
+    "pwm": 100.0,
+    "pulseOnMilliseconds": 50,
+    "pulsePeriodMilliseconds": 250,
+    "maximumAssistRpm": 1.0,
+    "minimumErrorDeg": 1.5,
+    "purpose": "setup-only breakaway bumps when the fixed setup PID is stalled; never active during candidate TEST_RETURN"
+  },
+  "pidRanges": {
+    "kp": [0.0, 3.0],
+    "ki": [0.0, 3.0],
+    "kd": [0.0, 3.0]
+  },
+  "maxSettlingTimeSeconds": 5.0,
+  "pidCoefficientStep": 0.001,
+  "serialAckRetries": 3,
+  "bayesianOptimization": {
+    "mode": "multiResponseDesirability",
+    "minimumRSquare": 0.10,
+    "scalarScoreUsedAsBayesianResponse": false,
+    "scalarScoreRetainedForDiagnosticsAndSetupSelection": false,
+    "responses": [
+      {
+        "name": "Settling Time (s)",
+        "goal": "minimize",
+        "importance": 10.0,
+        "lower": [0.60, 1.0],
+        "middle": [1.00, 0.80],
+        "upper": [5.0, 0.001]
+      },
+      {
+        "name": "Overshoot (deg)",
+        "goal": "minimize",
+        "importance": 6.0,
+        "lower": [0.0, 1.0],
+        "middle": [30.0, 0.20],
+        "upper": [300.0, 0.001]
+      }
+    ]
+  },
+  "scoreObjective": {
+    "purpose": "diagnostic ranking only; not used as a JMP Bayesian response",
+    "homeShortfallWeight": 100.0,
+    "settlingTimeWeight": 10.0,
+    "overshootWeight": 5.0,
+    "oscillationWeight": 2.0,
+    "abnormalPenalty": 500.0
+  },
+  "seedSettings": [
+    [1.844, 2.008, 0.230],
+    [1.650, 1.700, 0.100],
+    [2.050, 2.300, 0.400],
+    [2.560, 0.217, 2.610]
+  ],
+  "dataPolicy": {
+    "returnDeadlineSeconds": 5.0,
+    "timeoutStatus": "TEST_SETTLING_TIMEOUT",
+    "overshootModelMaxDeg": 300.0,
+    "overshootCanTerminateRun": false,
+    "overshootPolicy": "Overshoot is always retained as numeric BayesOpt data and does not terminate a physical run; the modeled response spans 0-300 deg while Raw Overshoot preserves the measured value",
+    "catastrophicOvershootDeg": 1000000.0,
+    "catastrophicOvershootStatus": "EXCESSIVE_OVERSHOOT_DISABLED_GUARD",
+    "recoveryMotionIncludedInScoring": false,
+    "newSessionPerLaunch": true,
+    "duplicateRoundedPidPolicy": "replace an already-tested rounded PID with the nearest untested 0.001-grid neighbor",
+    "returnFailureResponse": "retained as a diagnostic column only; not used as a JMP Bayesian response",
+    "homeReachedPolicy": "Home Reached remains a diagnostic only and is not a JMP Bayesian response",
+    "settlingTimePolicy": "Settling Time ends only after five consecutive 100 Hz samples are stationary inside HomePad; unsuccessful returns are 5.0 s",
+    "homePaddingPolicy": "PID target remains exactly Home=0; HomePad is measurement/pass tolerance only and never changes candidate PID output",
+    "fixedSetupPolicy": "every outbound 300-degree setup and post-trial recovery uses fixedSetupPID 1.35/0.4/0.1; setup-only 100-PWM breakaway pulses may assist a stalled setup; only candidate Kp Ki Kd vary in Bayesian Optimization",
+    "candidateControlPolicy": "pure positional PID at 100 Hz: u=Kp*error+Ki*integral-Kd*measured_position_velocity; no minimum PWM floor, no near-home taper, no deadband, no integral enable band, no integral bleed, no separate integral-output cap, and no coast-on-settle override during TEST_RETURN",
+    "firmwareTraceabilityPolicy": "every v55 physical trial must identify as DiscoveryPID pure-positional-pid-v4.0 2026-08-21; stale firmware is rejected before motion",
+    "seedDesignPolicy": "four seeds retain the prior fastest basin, two local bracketing points, and one robust high-D completion basin; v55 models only settling time and overshoot",
+    "failedTrialPolicy": "unsuccessful returns receive Settling Time=5.0 s; measured Overshoot remains numeric so BayesOpt can plot and predict across failed and successful regions",
+    "missingHomeEntryRpmResponse": 10.0,
+    "multiResponseRowsRemainNumeric": true,
+    "liveJmpTableVisible": true,
+    "rawMetricsPreservedInRunCsv": true,
+    "responseTransforms": {
+      "pwmChatter": {
+        "method": "min(cap, ln(1 + max(0, raw)))",
+        "cap": 3.0
+      },
+      "overshootDeg": {
+        "method": "min(cap, max(0, raw))",
+        "cap": 300.0
+      },
+      "homeEntryRpm": {
+        "method": "min(cap, max(0, raw))",
+        "cap": 10.0
+      },
+      "oscillations": {
+        "method": "min(cap, max(0, raw count))",
+        "cap": 3.0
+      }
+    }
+  },
+  "returnSmoothing": {
+    "enabled": false,
+    "minimumPwmTaperStartDeg": 0.0,
+    "minimumPwmTaperEndDeg": 0.0,
+    "integralEnableBandDeg": 1000000.0,
+    "maximumIntegralContributionPWM": 225.0,
+    "outputRpmFilterAlpha": 0.15,
+    "fastTelemetryHz": 100,
+    "pidGeneratedBidirectionalBraking": true,
+    "zeroCommandHardwareBrake": false,
+    "zeroCommandBehavior": "coast",
+    "coastBeforeReverse": false,
+    "controlLoopHz": 100,
+    "controllerForm": "positional PID",
+    "nearHomeModifiers": false,
+    "minimumPwmFloor": 0.0
+  }
+}

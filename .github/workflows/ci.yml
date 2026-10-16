@@ -1,0 +1,171 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install platformio -r requirements.txt
+
+      - name: Compile Python tools
+        run: |
+          python -m py_compile \
+            tools/run_position_trial.py \
+            tools/home_position.py \
+            tools/build_jmp_runtime.py
+
+      - name: Parse PowerShell helpers
+        shell: pwsh
+        run: |
+          $files = @(
+            "DiscoveryPID.ps1",
+            "scripts/position_v2/build_upload.ps1",
+            "scripts/position_v2/home.ps1",
+            "scripts/position_v2/open_jmp.ps1",
+            "scripts/position_v2/smoke_test.ps1",
+            "scripts/position_v2/control_test.ps1"
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | Format-List | Out-String | Write-Error
+              throw "PowerShell parse failed: $file"
+            }
+          }
+
+      - name: Check v50 final-approach optimization configuration
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          cfg = json.loads(Path('config/discoverypid.json').read_text())
+          launcher = Path('scripts/position_v2/open_jmp.ps1').read_text()
+          worker = Path('tools/run_position_trial.py').read_text()
+          fw = Path('src/main.cpp').read_text()
+
+          assert cfg['latestBranch'] == 'main'
+          assert cfg['studyName'] == 'PositionStudy_DirectPID_v50_FinalApproachSmooth_300Deg'
+          assert cfg['dataRoot'] == 'position_autotune_directpid_v50_final_approach_smooth'
+
+          assert cfg['firmwareId'] == 'DiscoveryPID direct-position-pid-v3.8-final-approach 2026-08-20'
+          assert 'EXPECTED_FW = "DiscoveryPID direct-position-pid-v3.8-final-approach"' in worker
+          assert 'direct-position-pid-v3.8-final-approach' in fw
+
+          assert cfg['pidRanges']['kp'] == [20.0, 26.0]
+          assert cfg['pidRanges']['ki'] == [5.0, 8.0]
+          assert cfg['pidRanges']['kd'] == [0.5, 4.0]
+          assert cfg['pidCoefficientStep'] == 0.5
+          assert cfg['maxSettlingTimeSeconds'] == 3.0
+          assert cfg['minimumDrivePWM'] == 80.0
+
+          smoothing = cfg['returnSmoothing']
+          assert smoothing['minimumPwmTaperStartDeg'] == 8.0
+          assert smoothing['minimumPwmTaperEndDeg'] == 3.0
+          assert smoothing['integralEnableBandDeg'] == 2.0
+          assert smoothing['maximumIntegralContributionPWM'] == 12.0
+          assert smoothing['controlLoopHz'] == 100
+          assert smoothing['pidGeneratedBidirectionalBraking'] is True
+          assert smoothing['zeroCommandHardwareBrake'] is False
+          assert smoothing['coastBeforeReverse'] is False
+
+          assert 'RETURN_MIN_PWM_TAPER_START_DEG = 8.0f' in fw
+          assert 'RETURN_MIN_PWM_TAPER_END_DEG = 3.0f' in fw
+          assert 'POSITION_I_ENABLE_BAND_DEG = 2.0f' in fw
+          assert 'POSITION_I_MAX_PWM = 12.0f' in fw
+          assert 'ki * positionIntegral' in fw
+          assert '-POSITION_I_MAX_PWM' in fw
+          assert 'POSITION_I_MAX_PWM' in fw
+
+          for kp, ki, kd in cfg['seedSettings']:
+              assert 20.0 <= kp <= 26.0
+              assert 5.0 <= ki <= 8.0
+              assert 0.5 <= kd <= 4.0
+              assert kp * 2 == round(kp * 2)
+              assert ki * 2 == round(ki * 2)
+              assert kd * 2 == round(kd * 2)
+          assert len({tuple(row) for row in cfg['seedSettings']}) == len(cfg['seedSettings'])
+          assert [23.5, 6.5, 1.0] in cfg['seedSettings']
+          assert [22.0, 7.0, 2.0] in cfg['seedSettings']
+
+          bo = cfg['bayesianOptimization']
+          assert bo['mode'] == 'multiResponseDesirability'
+          assert bo['scalarScoreUsedAsBayesianResponse'] is False
+          names = [r['name'] for r in bo['responses']]
+          assert names == [
+              'Return Failure', 'Settling Time (s)', 'PWM Chatter',
+              'Home Entry RPM', 'Overshoot (deg)', 'Oscillations'
+          ]
+          oscillation = next(r for r in bo['responses'] if r['name'] == 'Oscillations')
+          assert oscillation['goal'] == 'minimize'
+          assert oscillation['importance'] >= 8.0
+          assert oscillation['lower'][0] == 0.0
+
+          policy = cfg['dataPolicy']
+          assert policy['catastrophicOvershootDeg'] == 20.0
+          assert policy['catastrophicOvershootStatus'] == 'EXCESSIVE_OVERSHOOT'
+          assert policy['catastrophicOvershootRowsEligibleAsBestSetup'] is False
+          assert 'nearest untested' in policy['duplicateRoundedPidPolicy']
+          assert policy['multiResponseRowsRemainNumeric'] is True
+          assert policy['recoveryMotionIncludedInScoring'] is False
+
+          assert 'BAYESIAN DUPLICATE REPLACED' in launcher
+          assert 'combinationAlreadyCompleted( dt, proposedKp, proposedKi, proposedKd )' in launcher
+          assert 'nearest untested' in launcher
+          assert 'EXCESSIVE_OVERSHOOT' in launcher
+          assert 'resultList[4] > catastrophicOvershootDeg' in launcher
+          assert 'Column( dt, "Return Failure" )[rowIndex] = If( qualityStatus == "COMPLETE", 0, 1 );' in launcher
+          assert 'OSCILLATION COUNT' in launcher
+          PY
+
+      - name: Build and inspect JMP runtime base
+        run: |
+          python tools/build_jmp_runtime.py \
+            --repo . \
+            --port COM7 \
+            --python /usr/bin/python3 \
+            --output /tmp/DiscoveryPID_runtime.jsl
+
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('/tmp/DiscoveryPID_runtime.jsl').read_text()
+
+          assert 'PositionStudy_DirectPID_v50_FinalApproachSmooth_300Deg' in text
+          assert 'kpLow = 20.0;' in text
+          assert 'kpHigh = 26.0;' in text
+          assert 'kiLow = 5.0;' in text
+          assert 'kiHigh = 8.0;' in text
+          assert 'kdLow = 0.5;' in text
+          assert 'kdHigh = 4.0;' in text
+          assert 'MULTI-RESPONSE BAYESOPT DESIRABILITY' in text
+          assert ':Name( "Return Failure" )' in text
+          assert ':Name( "Settling Time (s)" )' in text
+          assert ':Name( "PWM Chatter" )' in text
+          assert ':Name( "Home Entry RPM" )' in text
+          assert ':Name( "Overshoot (deg)" )' in text
+          assert ':Oscillations' in text
+          assert 'Y( :Score )' not in text
+          assert 'Raw PWM Chatter' in text
+          assert 'Raw Overshoot (deg)' in text
+          PY
+
+      - name: Build Mega firmware
+        run: platformio run

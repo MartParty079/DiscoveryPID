@@ -1,0 +1,357 @@
+param(
+    [Parameter(Position = 0)]
+    [ValidateSet("menu", "home", "test", "jmp", "manual", "help")]
+    [string]$Command = "menu",
+
+    [string]$Port = ""
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+$repo = (Resolve-Path $PSScriptRoot).Path
+$configPath = Join-Path $repo "config\discoverypid.json"
+$settingsPath = Join-Path $repo ".git\discoverypid-user.json"
+
+if (-not (Test-Path (Join-Path $repo ".git"))) {
+    throw "Run DiscoveryPID.ps1 from the DiscoveryPID Git checkout."
+}
+
+if (-not (Test-Path $configPath)) {
+    throw "Project configuration not found: $configPath"
+}
+
+$project = Get-Content $configPath -Raw | ConvertFrom-Json
+
+function Get-SavedPort {
+    $defaultPort = [string]$project.defaultPort
+
+    if (Test-Path $settingsPath) {
+        try {
+            $saved = Get-Content $settingsPath -Raw | ConvertFrom-Json
+            if ($saved.Port) {
+                return [string]$saved.Port
+            }
+        }
+        catch {
+            Write-Warning "Ignoring unreadable local port settings."
+        }
+    }
+
+    return $defaultPort
+}
+
+function Save-Port([string]$Value) {
+    [pscustomobject]@{ Port = $Value } |
+        ConvertTo-Json |
+        Set-Content -Path $settingsPath -Encoding UTF8
+}
+
+$script:ActivePort = Get-SavedPort
+if ($Port) {
+    $script:ActivePort = $Port.ToUpperInvariant()
+    Save-Port $script:ActivePort
+}
+
+function Get-Python {
+    $py = Join-Path $env:USERPROFILE ".platformio\penv\Scripts\python.exe"
+    if (Test-Path $py) { return $py }
+
+    $command = Get-Command python -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+
+    throw "Python was not found."
+}
+
+function Round-PidValue([double]$Value) {
+    $step = [double]$project.pidCoefficientStep
+    if ($step -le 0) {
+        throw "pidCoefficientStep must be greater than zero."
+    }
+
+    return [Math]::Round(
+        $Value / $step,
+        0,
+        [MidpointRounding]::AwayFromZero
+    ) * $step
+}
+
+function Read-PidValue([string]$Name, [double]$Minimum, [double]$Maximum) {
+    while ($true) {
+        $text = Read-Host "$Name [$Minimum .. $Maximum]"
+        $value = 0.0
+
+        if (-not [double]::TryParse($text, [ref]$value)) {
+            Write-Warning "Enter a number."
+            continue
+        }
+
+        if ($value -lt $Minimum -or $value -gt $Maximum) {
+            Write-Warning "$Name must be between $Minimum and $Maximum."
+            continue
+        }
+
+        return Round-PidValue $value
+    }
+}
+
+function Read-ExactPidValue(
+    [string]$Name,
+    [double]$Minimum,
+    [double]$Maximum,
+    [double]$Default
+) {
+    while ($true) {
+        $text = Read-Host ("{0} [{1} .. {2}] (Enter = {3})" -f $Name, $Minimum, $Maximum, $Default)
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            return $Default
+        }
+
+        $value = 0.0
+        if (-not [double]::TryParse($text, [ref]$value)) {
+            Write-Warning "Enter a number."
+            continue
+        }
+
+        if ($value -lt $Minimum -or $value -gt $Maximum) {
+            Write-Warning "$Name must be between $Minimum and $Maximum."
+            continue
+        }
+
+        # TEST mode intentionally returns the value exactly as entered. It does
+        # not use the JMP pidCoefficientStep grid or any legacy worker rounding.
+        return $value
+    }
+}
+
+function Start-Home {
+    Write-Host "HOME mode - fresh calibration on $($script:ActivePort)" -ForegroundColor Cyan
+    & (Join-Path $repo "scripts\position_v2\home.ps1") -Port $script:ActivePort
+    if ($LASTEXITCODE -ne 0) { throw "Homing failed." }
+}
+
+function Start-Test {
+    $defaultKp = [double]$project.defaultPID.kp
+    $defaultKi = [double]$project.defaultPID.ki
+    $defaultKd = [double]$project.defaultPID.kd
+    $minimumDrivePWM = [double]$project.minimumDrivePWM
+    $maxSettlingTimeSeconds = [double]$project.maxSettlingTimeSeconds
+
+    Write-Host ""
+    Write-Host "TEST mode - exact PID manual return check" -ForegroundColor Cyan
+    Write-Host "Set the PID, let the motor coast, move the mechanism by hand, then release it to HOME."
+    Write-Host "TEST mode does NOT round PID values to the JMP grid." -ForegroundColor Green
+    Write-Host ("Hard return cutoff: {0:g} s" -f $maxSettlingTimeSeconds)
+    Write-Host "Start with the mechanism physically at the intended HOME position."
+    Write-Host ""
+
+    $kp = Read-ExactPidValue "Kp" ([double]$project.pidRanges.kp[0]) ([double]$project.pidRanges.kp[1]) $defaultKp
+    $ki = Read-ExactPidValue "Ki" ([double]$project.pidRanges.ki[0]) ([double]$project.pidRanges.ki[1]) $defaultKi
+    $kd = Read-ExactPidValue "Kd" ([double]$project.pidRanges.kd[0]) ([double]$project.pidRanges.kd[1]) $defaultKd
+
+    Write-Host ""
+    Write-Host "Exact PID sent directly to firmware:" -ForegroundColor Yellow
+    Write-Host ("  Kp = {0:R}" -f $kp)
+    Write-Host ("  Ki = {0:R}" -f $ki)
+    Write-Host ("  Kd = {0:R}" -f $kd)
+    Write-Host "  No JMP/grid quantization"
+    Write-Host "  Motor will coast while you manually displace it"
+    Write-Host ("  Hard cutoff = {0:g} s" -f $maxSettlingTimeSeconds)
+    Write-Host ""
+
+    $py = Get-Python
+    $checker = Join-Path $repo "tools\manual_return_check.py"
+    if (-not (Test-Path $checker)) {
+        throw "Manual return checker not found: $checker"
+    }
+
+    & $py $checker `
+        --port $script:ActivePort `
+        --kp $kp `
+        --ki $ki `
+        --kd $kd `
+        --minimum-drive-pwm $minimumDrivePWM `
+        --return-max-pwm 225 `
+        --settle-timeout $maxSettlingTimeSeconds
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Manual return check exited with code $LASTEXITCODE."
+    }
+}
+
+function Start-Jmp {
+    Write-Host "JMP mode - Bayesian physical study" -ForegroundColor Cyan
+    & (Join-Path $repo "scripts\position_v2\open_jmp.ps1") -Port $script:ActivePort
+}
+
+function Start-Manual {
+    $pidStep = [double]$project.pidCoefficientStep
+    $setupKp = [double]$project.fixedSetupPID.kp
+    $setupKi = [double]$project.fixedSetupPID.ki
+    $setupKd = [double]$project.fixedSetupPID.kd
+    $maxSettlingTimeSeconds = [double]$project.maxSettlingTimeSeconds
+
+    Write-Host ""
+    Write-Host "MANUAL PID mode" -ForegroundColor Cyan
+    Write-Host "Enter one PID set for a single automated 300-degree physical trial."
+    Write-Host "Values are rounded to the nearest $pidStep before running."
+    Write-Host ("Outbound/setup PID is fixed at Kp={0:F3} Ki={1:F3} Kd={2:F3}." -f $setupKp, $setupKi, $setupKd)
+    Write-Host ""
+
+    $kp = Read-PidValue "Kp" ([double]$project.pidRanges.kp[0]) ([double]$project.pidRanges.kp[1])
+    $ki = Read-PidValue "Ki" ([double]$project.pidRanges.ki[0]) ([double]$project.pidRanges.ki[1])
+    $kd = Read-PidValue "Kd" ([double]$project.pidRanges.kd[0]) ([double]$project.pidRanges.kd[1])
+    $minimumDrivePWM = [double]$project.minimumDrivePWM
+
+    Write-Host ""
+    Write-Host "Exact return PID to run:" -ForegroundColor Yellow
+    Write-Host ("  Kp = {0:F3}" -f $kp)
+    Write-Host ("  Ki = {0:F3}" -f $ki)
+    Write-Host ("  Kd = {0:F3}" -f $kd)
+    Write-Host ("  Fixed setup PID = {0:F3} / {1:F3} / {2:F3}" -f $setupKp, $setupKi, $setupKd)
+    Write-Host "  Displacement = 300 deg"
+    Write-Host ("  Settling max = {0:g} s HARD CUTOFF" -f $maxSettlingTimeSeconds)
+    Write-Host "  PWM floor = $minimumDrivePWM (return only)"
+    Write-Host "  Controller = 100 Hz active-brake direct PID"
+    Write-Host ""
+
+    $confirm = Read-Host "Run this physical trial? [Y/n]"
+    if ($confirm -match '^[Nn]') {
+        Write-Host "Manual trial cancelled."
+        return
+    }
+
+    $py = Get-Python
+    $worker = Join-Path $repo "tools\run_position_trial_configured.py"
+    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $dir = Join-Path $repo "data\manual_trials\$stamp"
+    New-Item -ItemType Directory -Force $dir | Out-Null
+
+    $result = Join-Path $dir "result.csv"
+    $raw = Join-Path $dir "response.csv"
+    $history = Join-Path $dir "history.csv"
+
+    Write-Host "Running manual physical trial..." -ForegroundColor Cyan
+
+    & $py $worker `
+        --port $script:ActivePort `
+        --trial 1 `
+        --kp $kp `
+        --ki $ki `
+        --kd $kd `
+        --test-offset 300 `
+        --return-max-pwm 225 `
+        --home-padding-pulses 8 `
+        --max-settling-seconds $maxSettlingTimeSeconds `
+        --minimum-drive-pwm $minimumDrivePWM `
+        --setup-kp $setupKp `
+        --setup-ki $setupKi `
+        --setup-kd $setupKd `
+        --result-file $result `
+        --raw-file $raw `
+        --history-file $history
+
+    $code = $LASTEXITCODE
+
+    Write-Host ""
+    if (Test-Path $result) {
+        Write-Host "Manual result:" -ForegroundColor Cyan
+        Get-Content $result
+        Write-Host ""
+        Write-Host "Saved under: $dir"
+    }
+
+    if ($code -ne 0) {
+        throw "Manual physical trial worker exited with code $code."
+    }
+}
+
+function Show-Help {
+    Write-Host @"
+DiscoveryPID modes
+
+  .\DiscoveryPID.ps1 home
+      Force fresh home/calibration.
+
+  .\DiscoveryPID.ps1 test
+      Enter an exact PID with NO host-side rounding.
+      The motor coasts while you manually displace the mechanism.
+      Press Enter to release it and observe the PID return to HOME.
+      The return ends after $($project.maxSettlingTimeSeconds) seconds if it has not settled.
+
+  .\DiscoveryPID.ps1 jmp
+      Launch the current JMP Bayesian study.
+      JMP PID values use the configured $($project.pidCoefficientStep) grid.
+      BayesOpt varies only Kp/Ki/Kd and models Home Shortfall, Settling Time, and Overshoot.
+      Every outbound/recovery move uses the fixed setup PID.
+
+  .\DiscoveryPID.ps1 manual
+      Prompt for return Kp/Ki/Kd and run one automated 300-degree physical trial.
+      The outbound/setup move uses the configured fixed setup PID.
+      Automated trial PID values are rounded to the nearest $($project.pidCoefficientStep).
+
+Run .\DiscoveryPID.ps1 with no command for the four-option menu.
+Optional port override: .\DiscoveryPID.ps1 test -Port COM8
+"@
+}
+
+function Show-Menu {
+    while ($true) {
+        Clear-Host
+        Write-Host "DiscoveryPID" -ForegroundColor Cyan
+        Write-Host $project.profileName -ForegroundColor DarkCyan
+        Write-Host "Port: $($script:ActivePort)"
+        Write-Host ("Default PID: Kp={0:F3} Ki={1:F3} Kd={2:F3}" -f [double]$project.defaultPID.kp, [double]$project.defaultPID.ki, [double]$project.defaultPID.kd)
+        Write-Host ("Fixed setup PID: Kp={0:F3} Ki={1:F3} Kd={2:F3}" -f [double]$project.fixedSetupPID.kp, [double]$project.fixedSetupPID.ki, [double]$project.fixedSetupPID.kd)
+        Write-Host "PID limits: Kp <= $($project.pidRanges.kp[1]), Ki <= $($project.pidRanges.ki[1]), Kd <= $($project.pidRanges.kd[1])"
+        Write-Host "TEST PID: exact value entered (no host rounding)" -ForegroundColor Green
+        Write-Host "JMP/automated PID grid: nearest $($project.pidCoefficientStep)"
+        Write-Host "Return cutoff: $($project.maxSettlingTimeSeconds) s"
+        Write-Host "PWM floor: $($project.minimumDrivePWM)"
+        Write-Host ""
+        Write-Host "[1] HOME   - recalibrate / set zero"
+        Write-Host "[2] TEST   - exact PID + manual displacement return check"
+        Write-Host "[3] JMP    - Bayesian optimization"
+        Write-Host "[4] MANUAL - automated 300-deg trial with entered PID"
+        Write-Host "[P] PORT   - change serial port"
+        Write-Host "[Q] QUIT"
+        Write-Host ""
+
+        $choice = Read-Host "Mode"
+
+        try {
+            switch -Regex ($choice) {
+                '^[1Hh]$' { Start-Home; break }
+                '^[2Tt]$' { Start-Test; break }
+                '^[3Jj]$' { Start-Jmp; break }
+                '^[4Mm]$' { Start-Manual; break }
+                '^[Pp]$' {
+                    $newPort = Read-Host "Serial port [$($script:ActivePort)]"
+                    if ($newPort) {
+                        $script:ActivePort = $newPort.ToUpperInvariant()
+                        Save-Port $script:ActivePort
+                    }
+                    continue
+                }
+                '^[Qq]$' { return }
+                default { continue }
+            }
+        }
+        catch {
+            Write-Host ""
+            Write-Host $_.Exception.Message -ForegroundColor Red
+        }
+
+        Write-Host ""
+        [void](Read-Host "Press Enter for menu")
+    }
+}
+
+switch ($Command) {
+    "home"   { Start-Home }
+    "test"   { Start-Test }
+    "jmp"    { Start-Jmp }
+    "manual" { Start-Manual }
+    "help"   { Show-Help }
+    "menu"   { Show-Menu }
+}
