@@ -3,9 +3,9 @@ Names Default To Here(1);
 
 // --- Connection and trial settings ---
 // Update these paths and the serial port for the local machine.
-port = "COM7";
-root = "C:/Users/mkime/Documents/GITHUB/PID Discovery/DiscoveryPID/";
-python = "C:/Users/mkime/.platformio/penv/Scripts/python.exe";
+port = "COM3";
+root = "C:\Users\vgolf\Documents\DiscoveryPID\DiscoveryPID";
+python = "C:\Users\vgolf\.platformio\penv\Scripts\python.exe";
 worker = root || "tools/run_position_trial.py";
 
 // Initial gain combinations, in {KP, KI, KD} order.
