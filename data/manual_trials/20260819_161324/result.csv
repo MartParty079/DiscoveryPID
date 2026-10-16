@@ -1,2 +1,0 @@
-Run,KP,KI,KD,Score,Settling Time (s),Return Timer Started,Overshoot (deg),Oscillations,PWM Chatter,IAE (deg*s),Peak Output RPM,Final Error (deg),Success,Status,Samples,Firmware,Raw File
-1,400.00000000,150.00000000,160.00000000,17.67433722,2.34300000,1,10.08000000,4,0.00000000,75.08372199,137.39000000,0.63000000,0,COMPLETE,31,DiscoveryPID direct-position-pid-v3.4-300deg-10xrange 2026-08-18,C:\Users\mkime\Documents\GITHUB\PID Discovery\DiscoveryPID\data\manual_trials\20260819_161324\response.csv
