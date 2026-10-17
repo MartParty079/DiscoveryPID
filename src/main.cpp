@@ -21,6 +21,8 @@ constexpr float DEG = 360.0f / (ENCODER_COUNTS_PER_REV * GEAR_RATIO);
 // reverse either the motor direction wiring or encoder A/B order, then verify.
 
 constexpr float MAXPWM = 225; // CHANGE output cap for the motor/driver (0-255).
+constexpr int MINPWM = 37;    // Minimum magnitude for any nonzero motor command.
+static_assert(MINPWM > 0 && MINPWM <= MAXPWM, "Invalid minimum PWM");
 // Fixed gains move to the start angle and recover Home after each trial.
 // CHANGE these for a different motor, load, or supply; JMP does not tune them.
 constexpr float SKP = 1.35f; // Position error correction.
@@ -86,6 +88,9 @@ long count() {
 // Apply u: its sign chooses direction and its size chooses motor drive strength.
 void drive(float u) {
   int p = constrain((int)lroundf(fabsf(u)), 0, (int)MAXPWM); // Rounded PWM magnitude.
+  // Preserve zero as stop; boost nonzero commands in either direction.
+  if (u != 0 && p < MINPWM) p = MINPWM;
+  // Telemetry reports this applied value, including the minimum PWM boost.
   pwm = u > 0 ? p : u < 0 ? -p : 0;
 
   // Clear the opposite direction output before applying the requested PWM.
@@ -229,6 +234,7 @@ void loop() {
   }
 
   // Active-mode CSV: D,time_ms,mode,position_deg,error_deg,encoder_count,pwm.
+  // pwm is the signed value applied to the driver: 0 or magnitude 37-225.
   if (mode) {
     Serial.print("D,");
     Serial.print(now);

@@ -15,18 +15,29 @@ seeds = {
     {2.050, 2.300, .400},
     {2.560, .217, 2.610}
 };
-maxRuns = 50; // Total trial budget, including the seed trials.
+maxRuns = 8; // Total trial budget, including the seed trials.
 
 // --- Python trial bridge ---
 // Wrap an argument in double quotes to preserve paths containing spaces.
 q = Function({x}, "\!"" || Char(x) || "\!"");
+
+// Create one unique experiment folder for all seed and optimization trials.
+experimentDir = Trim(Run Program(
+    Executable(python),
+    Options({q(worker), "--new-experiment"}),
+    Read Function("text")
+));
+If(!Directory Exists(experimentDir),
+    Throw("Could not create the experiment log folder: " || experimentDir)
+);
+Show(experimentDir);
 
 // Run one hardware trial and parse Python's "settling_time,overshoot" output.
 // The worker handles serial communication and recovery to Home.
 run = Function({p, i, d}, {o, w},
     o = Run Program(
         Executable(python),
-        Options({q(worker), q(port), Char(p), Char(i), Char(d)}),
+        Options({q(worker), q(port), Char(p), Char(i), Char(d), q(experimentDir)}),
         Read Function("text")
     );
     w = Words(Trim(o), ",");
@@ -94,11 +105,12 @@ For(iter = 1, iter <= maxRuns - N Items(seeds), iter++,
         X(:KP, :KI, :KD),
         Iteration(:Iteration),
         Run Order(:Run),
-	Continuous Correlation Type( "Matern 5" ),
-	Nominal Correlation Type( "Equal Correlations" ),
-	Ordinal Correlation Type( "Equal Correlations" ),
-	Model Based Augmentation RSquare Threshold( 0.25 ),
-        
+	    Continuous Correlation Type( "Matern 5" ),
+	    Nominal Correlation Type( "Equal Correlations" ),
+	    Ordinal Correlation Type( "Equal Correlations" ),
+	    Model Based Augmentation RSquare Threshold( 0.25 ),
+        Batch Selection(
+        Candidate Runs(
  //       Generate Candidate Set(Candidate Set Size(3000), Include Runs that Do Not Conform to Constraints(1)),
  //       Autoselect Batch(Batch Size(1), Minimum RSquare(.01)),
 			Make Table Options(
@@ -108,16 +120,19 @@ For(iter = 1, iter <= maxRuns - N Items(seeds), iter++,
 				Save startup script for next batch selection to data table(1),
 				Include reason added column( 1 )
 			)
+        )
+    )
 //        Load Candidate Set from Data Table()
     );
-
+    Wait(0);
     // Append the candidate and allow JMP time to update the table.
     // Stop if no new row was added.
     bo << Make Table;
-    Wait(2);
     show(iter);
     n = N Rows(dt);
     If(n <= before, Break());
+
+    bo << Close Window();
 
     // Match the worker's three-decimal gain precision and record tested gains.
     p = Round(Column(dt, "KP")[n] * 1000) / 1000;
