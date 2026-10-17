@@ -20,7 +20,7 @@ constexpr float DEG = 360.0f / (ENCODER_COUNTS_PER_REV * GEAR_RATIO);
 // Positive motor output must increase encoder count. If direction is wrong,
 // reverse either the motor direction wiring or encoder A/B order, then verify.
 
-constexpr float MAXPWM = 225; // CHANGE output cap for the motor/driver (0-255).
+constexpr float MAXPWM = 255; // CHANGE output cap for the motor/driver (0-255).
 constexpr int MINPWM = 37;    // Minimum magnitude for any nonzero motor command.
 static_assert(MINPWM > 0 && MINPWM <= MAXPWM, "Invalid minimum PWM");
 // Fixed gains move to the start angle and recover Home after each trial.
