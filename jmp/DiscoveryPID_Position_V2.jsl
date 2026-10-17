@@ -103,7 +103,9 @@ For(iter = 1, iter <= maxRuns - N Items(seeds), iter++,
         Run Order(:Run),
         Generate Candidate Set(Candidate Set Size(3000)),
         Autoselect Batch(Batch Size(1), Minimum RSquare(.10)),
-        Make Table Options(Location(1), Randomize Runs(0))
+        Make Table Options(Location(1), Randomize Runs(0)),
+        Include predicted response values(1),
+        Include prediction standard deviations(1)
     );
 
     // Append the candidate and allow JMP time to update the table.
