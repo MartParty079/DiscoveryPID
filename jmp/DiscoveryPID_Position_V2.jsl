@@ -15,7 +15,7 @@ seeds = {
     {2.050, 2.300, .400},
     {2.560, .217, 2.610}
 };
-maxRuns = 8; // Total trial budget, including the seed trials.
+maxRuns = 27; // About 100 minutes at full setup/return/recovery limits; includes seeds and failures.
 
 // --- Python trial bridge ---
 // Wrap an argument in double quotes to preserve paths containing spaces.
@@ -41,7 +41,16 @@ run = Function({p, i, d}, {o, w},
         Read Function("text")
     );
     w = Words(Trim(o), ",");
-    Eval List({Num(w[1]), Num(w[2])});
+    If(N Items(w) != 2,
+        Return({., ., "invalid_response"})
+    );
+    If(w[1] == "ERROR",
+        Return(Eval List({., ., w[2]}))
+    );
+    If(Is Missing(Num(w[1])) | Is Missing(Num(w[2])),
+        Return({., ., "non_numeric_response"})
+    );
+    Eval List({Num(w[1]), Num(w[2]), "measured"});
 );
 
 // --- Results table and optimization objectives ---
@@ -55,6 +64,43 @@ dt = New Table("Barebones PID BayesOpt",
     New Column("Overshoot deg", Numeric, Continuous)
 );
 
+failedTrials = New Table("PID Failed Trials",
+    New Column("Iteration", Numeric, Ordinal),
+    New Column("KP", Numeric, Continuous),
+    New Column("KI", Numeric, Continuous),
+    New Column("KD", Numeric, Continuous),
+    New Column("Status", Character, Nominal)
+);
+recordFailure = Function({p, kiValue, d, iterationValue, statusValue}, {row},
+    failedTrials << Add Rows(1);
+    row = N Rows(failedTrials);
+    Column(failedTrials, "Iteration")[row] = iterationValue;
+    Column(failedTrials, "KP")[row] = p;
+    Column(failedTrials, "KI")[row] = kiValue;
+    Column(failedTrials, "KD")[row] = d;
+    Column(failedTrials, "Status")[row] = statusValue;
+    Print("Trial skipped: " || statusValue || ". Continuing experiment.");
+    failedTrials << Save(experimentDir || "\failed_trials.jmp");
+);
+// Failed trials stay out of the optimization table entirely.
+recordMeasurement = Function({p, kiValue, d, iterationValue, result}, {row},
+    If(result[3] != "measured",
+        recordFailure(p, kiValue, d, iterationValue, result[3]);
+        Return(0)
+    );
+    dt << Add Rows(1);
+    row = N Rows(dt);
+    Column(dt, "Run")[row] = row;
+    Column(dt, "Iteration")[row] = iterationValue;
+    Column(dt, "KP")[row] = p;
+    Column(dt, "KI")[row] = kiValue;
+    Column(dt, "KD")[row] = d;
+    Column(dt, "Settling Time s")[row] = result[1];
+    Column(dt, "Overshoot deg")[row] = result[2];
+    dt << Save(experimentDir || "\results.jmp");
+    1;
+);
+
 // Treat all three gains as continuous factors over the 0-3 range.
 For Each({c}, {"KP", "KI", "KD"},
     Column(dt, c) << Set Property("Design Role", DesignRole(Continuous));
@@ -65,7 +111,7 @@ For Each({c}, {"KP", "KI", "KD"},
 Column(dt, "Settling Time s") << Set Property("Response Limits", {
     Lower(.6, 1),
     Middle(1, .8),
-    Upper(5, .001),
+    Upper(180, .001),
     Goal(Minimize),
     Importance(10)
 });
@@ -81,23 +127,21 @@ Column(dt, "Overshoot deg") << Set Property("Response Limits", {
 // Measure the initial combinations before requesting new candidates.
 // Iteration 0 identifies these seed measurements in the results table.
 For(i = 1, i <= N Items(seeds), i++,
-show("inside 72 for, i=" || char(i));
     r = run(seeds[i][1], seeds[i][2], seeds[i][3]);
-    dt << Add Rows(1);
-    n = N Rows(dt);
-
-    Column(dt, "Run")[n] = n;
-    Column(dt, "Iteration")[n] = 0;
-    Column(dt, "KP")[n] = seeds[i][1];
-    Column(dt, "KI")[n] = seeds[i][2];
-    Column(dt, "KD")[n] = seeds[i][3];
-    Column(dt, "Settling Time s")[n] = r[1];
-    Column(dt, "Overshoot deg")[n] = r[2];
+    recordMeasurement(seeds[i][1], seeds[i][2], seeds[i][3], 0, r);
 );
 
 // --- Sequential Bayesian optimization ---
 // Request and measure one candidate at a time using the accumulated results.
 For(iter = 1, iter <= maxRuns - N Items(seeds), iter++,
+    // Replenish seed measurements before fitting the optimizer after failures.
+    If(N Rows(dt) < N Items(seeds),
+        seedIndex = Mod(iter - 1, N Items(seeds)) + 1;
+        r = run(seeds[seedIndex][1], seeds[seedIndex][2], seeds[seedIndex][3]);
+        recordMeasurement(seeds[seedIndex][1], seeds[seedIndex][2], seeds[seedIndex][3], 0, r);
+        Continue();
+    );
+    Current Data Table(dt);
     before = N Rows(dt);
     bo = dt << Bayesian Optimization(
 //        Y(:Name("Settling Time s"), :Name("Overshoot deg")),
@@ -147,6 +191,16 @@ For(iter = 1, iter <= maxRuns - N Items(seeds), iter++,
 
     // Store both measured responses for the next optimization iteration.
     r = run(p, i, d);
+    If(r[3] != "measured",
+        dt << Delete Rows(n);
+        recordFailure(p, i, d, iter, r[3]);
+        Continue();
+    );
     Column(dt, "Settling Time s")[n] = r[1];
     Column(dt, "Overshoot deg")[n] = r[2];
+    dt << Save(experimentDir || "\results.jmp");
 );
+
+dt << Save(experimentDir || "\results.jmp");
+Print("Experiment finished: " || Char(N Rows(dt)) || " measured trials; " ||
+    Char(N Rows(failedTrials)) || " failed trials. Logs: " || experimentDir);

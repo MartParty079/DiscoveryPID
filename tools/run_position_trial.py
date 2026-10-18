@@ -1,4 +1,5 @@
 import csv
+import json
 from datetime import datetime
 from pathlib import Path
 import sys,time,serial
@@ -21,7 +22,13 @@ if sys.argv[1:]==["--new-experiment"]:
     sys.exit(0)
 
 port=sys.argv[1];kp,ki,kd=[round(float(x),3) for x in sys.argv[2:5]]
-settle,over,s=5.0,300.0,None
+MAX_SETTLING_SECONDS=180.0
+SETTLING_COUNTS=75
+MAX_SETUP_SECONDS=20.0
+settle,over,s=MAX_SETTLING_SECONDS,300.0,None
+status,detail="error","Trial did not complete"
+setup_seconds=return_seconds=None
+final_counts_from_home=None
 
 # One CSV per worker invocation; exclusive creation avoids overwriting a trial.
 # JSL supplies the same experiment directory to every trial in its run.
@@ -68,19 +75,50 @@ try:
     while s.in_waiting:line()
     send("ZERO");send(f"KP={kp}");send(f"KI={ki}");send(f"KD={kd}");send("TEST")
     over=0.0;t0=time.monotonic();ret=last=None;stable=0
-    while time.monotonic()-t0<50:
+    return_start=last_data=None
+    while True:
+        now=time.monotonic()
+        if ret is None and now-t0>=MAX_SETUP_SECONDS:
+            status,detail="setup_timeout",f"No RETURN received within {MAX_SETUP_SECONDS:g} seconds"
+            setup_seconds=now-t0
+            break
+        if ret is not None and now-return_start>=MAX_SETTLING_SECONDS+1:
+            return_seconds=now-return_start
+            if last_data is None or now-last_data>1:
+                status,detail="telemetry_timeout","Return telemetry stopped before measurement completed"
+            else:
+                status,detail="not_settled",f"Return reached the {MAX_SETTLING_SECONDS:g} second limit"
+            break
         z=line()
         if z.startswith("RETURN,"):
-            ret=int(z.split(",")[1]);continue
+            if ret is None:
+                ret=int(z.split(",")[1])
+                return_start=time.monotonic()
+                setup_seconds=return_start-t0
+            continue
+        if z.startswith("D,") and len(z.split(","))<8:
+            status,detail="firmware_mismatch","Upload firmware with the relative_count serial field"
+            break
         if not z.startswith("D,") or ret is None:
             continue
-        a=z.split(",");ms,pos,count=int(a[1]),float(a[3]),int(a[5]);t=(ms-ret)/1000
-        over=max(over,max(0.0,-pos));stable=stable+1 if abs(count)<=2 and count==last else 0;last=count
+        a=z.split(",")
+        if int(a[2])!=2:
+            continue
+        ms,pos,count=int(a[1]),float(a[3]),int(a[7]);t=((ms-ret) % (2**32))/1000
+        final_counts_from_home=count
+        last_data=time.monotonic();return_seconds=t
+        over=max(over,max(0.0,-pos))
+        # Do not count a late sample toward settling inside the allowed window.
+        if t>=MAX_SETTLING_SECONDS:
+            status,detail="not_settled",f"Return reached the {MAX_SETTLING_SECONDS:g} second limit"
+            break
+        stable=stable+1 if abs(count)<=SETTLING_COUNTS and count==last else 0;last=count
         if stable>=5:
-            settle=min(5.0,t);break
-        if t>=5:break
-except Exception:
-    settle,over=5.0,300.0
+            settle=t
+            status,detail="settled",f"Stationary within {SETTLING_COUNTS} Home-relative counts"
+            break
+except Exception as exc:
+    status,detail="error",f"{type(exc).__name__}: {exc}"
 finally:
     if s:
         try:
@@ -105,4 +143,14 @@ finally:
     if pending:
         record(pending)
     log.close()
-print(f"{settle:.4f},{min(over,300):.4f}")
+valid=status in ("settled","not_settled")
+log_path.with_suffix(".json").write_text(json.dumps({
+    "status":status,"detail":detail,"setup_seconds":setup_seconds,
+    "return_seconds":return_seconds,"settling_time_s":settle if valid else None,
+    "overshoot_deg":min(over,300) if valid else None,
+    "final_counts_from_home":final_counts_from_home
+},indent=2),encoding="utf-8")
+if valid:
+    print(f"{settle:.4f},{min(over,300):.4f}")
+else:
+    print(f"ERROR,{status}")

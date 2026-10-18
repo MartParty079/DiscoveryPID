@@ -31,17 +31,17 @@ constexpr float SKD = .1f;   // Damping from measured movement speed.
 constexpr float INTEGRAL_LIMIT = 2000.0f; // Maximum accumulated error, deg*s.
 
 constexpr float TEST_ANGLE = 300;        // CHANGE trial start angle, in degrees.
-constexpr float START_ERROR = 1.5f;      // Allowed error at the start angle, deg.
+constexpr float START_ERROR = 45.0f;      // Allowed error at the start angle, deg.
 constexpr float START_SPEED = 12;        // Allowed speed there, deg/s.
 constexpr uint32_t START_HOLD_MS = 850;  // Stay within both limits this long.
-constexpr long HOME_COUNTS = 2;          // Allowed distance from Home, counts.
+constexpr long HOME_COUNTS = 75;          // Allowed distance from Home, counts.
 constexpr byte HOME_SAMPLES = 5;         // Unmoving samples before recovery ends.
 constexpr uint32_t CONTROL_PERIOD_MS = 10; // Minimum update interval; 10 = 100 Hz.
 constexpr unsigned long SERIAL_BAUD = 115200; // Match Python and platformio.ini.
 constexpr unsigned long SERIAL_TIMEOUT_MS = 10; // Wait for a serial line, ms.
 // If changing the angle or timing, review tools/run_position_trial.py:
-// it measures negative-position overshoot, uses 5 s return/50 s overall limits,
-// and waits up to 20 s for recovery. Its settling rule also uses 2 counts/5 samples.
+// it measures negative-position overshoot, uses separate 20 s setup/180 s return limits,
+// and waits up to 20 s for recovery. Its settling rule uses 75 counts/5 comparisons.
 // Review JMP response limits if the experiment's angle or scoring changes.
 
 // --- Runtime values: updated by the program, not hardware settings ---
@@ -58,6 +58,8 @@ float kd = .1f;   // Trial return: damping from measured speed.
 float I = 0;      // Accumulated position error (deg*s); reset for each move.
 float target = 0; // Requested output angle relative to Home, in degrees.
 float pwm = 0;    // Last applied signed motor command, also sent in telemetry.
+float pTerm = 0, iTerm = 0, dTerm = 0;
+float pidRaw = 0; // Sum of signed PID contributions before output limits/floor.
 long home = 0;    // Encoder count defined as the zero-degree position.
 long last = 0;    // Previous control sample's encoder count; used for velocity.
 // Modes: 0 = idle, 1 = move to TEST_ANGLE, 2 = trial return, 3 = recovery.
@@ -113,9 +115,24 @@ float pid(float e, float v, float dt, bool setup) {
   // Use fixed gains for setup/recovery and candidate gains for the trial.
   // P, K, D are the selected proportional, integral, and derivative gains.
   float P = setup ? SKP : kp, K = setup ? SKI : ki, D = setup ? SKD : kd;
-  I = constrain(I + e * dt, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
+  float nextI = constrain(I + e * dt, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
+  if (setup) {
+    // Reject integration only when it pushes the fixed controller farther
+    // into output saturation. Opposite-sign increments can still unwind I.
+    float proposed = P * e + K * nextI - D * v;
+    float integralChange = K * (nextI - I);
+    bool windsUp = (proposed > MAXPWM && integralChange > 0) ||
+                   (proposed < -MAXPWM && integralChange < 0);
+    if (!windsUp) I = nextI;
+  } else {
+    I = nextI; // Preserve the candidate controller for this isolated experiment.
+  }
   // Derivative acts on measured velocity; bound the final motor command.
-  return constrain(P * e + K * I - D * v, -MAXPWM, MAXPWM);
+  pTerm = P * e;
+  iTerm = K * I; // Actual integral contribution after accepting/rejecting nextI.
+  dTerm = -D * v;
+  pidRaw = pTerm + iTerm + dTerm;
+  return constrain(pidRaw, -MAXPWM, MAXPWM);
 }
 
 // Call the present position Home. This does not physically move or find Home.
@@ -233,7 +250,8 @@ void loop() {
     } else stable = 0;
   }
 
-  // Active-mode CSV: D,time_ms,mode,position_deg,error_deg,encoder_count,pwm.
+  // Active-mode CSV: D,time_ms,mode,position_deg,error_deg,encoder_count,pwm,
+  //                 relative_count,p_term,i_term,d_term,pid_raw.
   // pwm is the signed value applied to the driver: 0 or magnitude 37-225.
   if (mode) {
     Serial.print("D,");
@@ -247,6 +265,16 @@ void loop() {
     Serial.print(",");
     Serial.print(c);
     Serial.print(",");
-    Serial.println(pwm, 0);
+    Serial.print(pwm, 0);
+    Serial.print(",");
+    Serial.print(c - home); // Exact Home-relative count for Python settling checks.
+    Serial.print(",");
+    Serial.print(pTerm, 3);
+    Serial.print(",");
+    Serial.print(iTerm, 3);
+    Serial.print(",");
+    Serial.print(dTerm, 3);
+    Serial.print(",");
+    Serial.println(pidRaw, 3);
   }
 }
