@@ -1,0 +1,25 @@
+// The BAD code
+Bayesian Optimization(
+	Y( :Settling Time s, :Overshoot deg ),
+	X( :KP, :KI, :KD ),
+	Iteration( :Iteration ),
+	Continuous Correlation Type( "Matern 5" ),
+	Nominal Correlation Type( "Equal Correlations" ),
+	Ordinal Correlation Type( "Equal Correlations" ),
+	Model Based Augmentation RSquare Threshold( 0.25 ),
+	Response Model Tab(
+		Y( :Settling Time s ),
+		Theta Values( {1.0989010989011, 0.480076812289966, 0.398406374501992} ),
+		Nugget( 0.0168756776098604 ),
+		Residual( 14.8142199548732 ),
+		Intercept( 5 )
+	),
+	Response Model Tab(
+		Y( :Overshoot deg ),
+		Theta Values( {1.0989010989011, 0.480076812289966, 0.398406374501992} ),
+		Nugget( 0.0168756776073164 ),
+		Residual( 14.8142199571064 ),
+		Intercept( 0 )
+	),
+	SendToReport( Dispatch( {}, "", TabListBox, {Set Selected( 2 )} ) )
+);
