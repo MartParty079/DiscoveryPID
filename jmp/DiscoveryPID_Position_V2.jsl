@@ -36,7 +36,7 @@ Show(experimentDir);
 // The worker handles serial communication and recovery to Home.
 run = Function({p, i, d}, {o, w},
     o = Run Program(
-        Executable(python),
+        Executable(python), // path to the Python interpreter
         Options({q(worker), q(port), Char(p), Char(i), Char(d), q(experimentDir)}),
         Read Function("text")
     );
@@ -154,19 +154,16 @@ For(iter = 1, iter <= maxRuns - N Items(seeds), iter++,
 	    Ordinal Correlation Type( "Equal Correlations" ),
 	    Model Based Augmentation RSquare Threshold( 0.25 ),
         Batch Selection(
-        Candidate Runs(
- //       Generate Candidate Set(Candidate Set Size(3000), Include Runs that Do Not Conform to Constraints(1)),
- //       Autoselect Batch(Batch Size(1), Minimum RSquare(.01)),
-			Make Table Options(
-				Location( 1 ),
-				Randomize Runs( 1 ),
-				Save desirability function values to columns( 1 ),
-				Save startup script for next batch selection to data table(1),
-				Include reason added column( 1 )
-			)
+            Candidate Runs(
+			    Make Table Options(
+				    Location( 1 ),
+				    Randomize Runs( 1 ),
+				    Save desirability function values to columns( 1 ),
+				    Save startup script for next batch selection to data table(1),
+				    Include reason added column( 1 )
+			    )
+            )
         )
-    )
-//        Load Candidate Set from Data Table()
     );
     Wait(0);
     // Append the candidate and allow JMP time to update the table.
