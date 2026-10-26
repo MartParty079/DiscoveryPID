@@ -22,9 +22,9 @@ if sys.argv[1:]==["--new-experiment"]:
     sys.exit(0)
 
 port=sys.argv[1];kp,ki,kd=[round(float(x),3) for x in sys.argv[2:5]]
-MAX_SETTLING_SECONDS=180.0
+MAX_SETTLING_SECONDS=20.0
 SETTLING_COUNTS=75
-MAX_SETUP_SECONDS=20.0
+MAX_SETUP_SECONDS=12.0
 settle,over,s=MAX_SETTLING_SECONDS,300.0,None
 status,detail="error","Trial did not complete"
 setup_seconds=return_seconds=None

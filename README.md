@@ -27,18 +27,18 @@ continuing the experiment. Failed trials are excluded from optimization. Each CS
 matching `.json` summary containing status, diagnostic detail, setup duration,
 return duration, and measured results (null for invalid trials).
 
-Setup has its own 20-second limit to receive `RETURN`; the return then gets its
-full 180-second window, independent of time spent positioning. A return that does
-not settle scores 180 seconds. A setup timeout, incompatible firmware, or lost
-return telemetry is an invalid trial, not a 180-second settling measurement.
+Setup has its own 12-second limit to receive `RETURN`; the return then gets its
+full 20-second window, independent of time spent positioning. A return that does
+not settle scores 20 seconds. A setup timeout, incompatible firmware, or lost
+return telemetry is an invalid trial, not a 20-second settling measurement.
 If return telemetry cannot complete the measurement, a PC watchdog ends the
-wait after 181 seconds from receipt of `RETURN` (one second of serial grace).
+wait after 21 seconds from receipt of `RETURN` (one second of serial grace).
 Home recovery retains its separate 20-second limit.
 Setup accepts position within +/-3 degrees of 300 degrees, with speed at most
 12 degrees/second continuously for 850 ms. The wider setup tolerance does not
 change the return-settling tolerance.
 
-The 27-trial budget counts attempted trials, including failures. JSL attempts
+The 115-trial budget counts attempted trials, including failures. JSL attempts
 all seed trials even if earlier ones fail, then uses remaining attempts to
 replenish seed measurements until four valid measurements are available before
 requesting optimization candidates. If no valid trials can be collected, it
@@ -61,7 +61,7 @@ The existing `pwm` field remains the actual signed output applied to the driver.
 All fields are captured in each CSV's Raw Serial Line; the earlier field
 positions remain unchanged for compatibility with the Python worker.
 
-The candidate controller is `u = Kp*error + Ki*integral - Kd*position_velocity`, PWM limited to ±225. Every nonzero command has a minimum PWM magnitude of 37, preserving direction; zero still stops the motor. This minimum applies to trial, setup, and recovery motion. The serial `pwm` field reports the actual signed PWM applied after rounding and limits. The fixed 300° setup and recovery controller is PID 1.35/0.4/0.1. Overshoot never ends a run; it is measured up to 300°. A return ends when it is stationary within ±75 encoder counts for five 100 Hz samples or at the 180 s cutoff.
+The candidate controller is `u = Kp*error + Ki*integral - Kd*position_velocity`, PWM limited to ±225. Every nonzero command has a minimum PWM magnitude of 37, preserving direction; zero still stops the motor. This minimum applies to trial, setup, and recovery motion. The serial `pwm` field reports the actual signed PWM applied after rounding and limits. The fixed 300° setup and recovery controller is PID 1.35/0.4/0.1. Overshoot never ends a run; it is measured up to 300°. A return ends when it is stationary within ±75 encoder counts for five 100 Hz samples or at the 20 s cutoff.
 
 Before flashing/resetting, put the arm physically at Home. Each trial re-zeros at Home after the previous fixed-PID recovery.
 
@@ -78,7 +78,7 @@ the last return-test sample, before Home recovery. It is null if no return
 sample was received. The settling band is inclusive (+/-75 counts, about
 +/-2.54 degrees), still requiring five consecutive unchanged-count comparisons.
 
-The 27-attempt budget targets roughly 100 minutes when trials use their full
-20-second setup, 180-second return, and 20-second recovery windows, plus serial
+The 115-attempt budget targets roughly 100 minutes when trials use their full
+12-second setup, 20-second return, and 20-second recovery windows, plus serial
 and JMP overhead. Early settling or failed setup can shorten the experiment;
 this run count is an estimate, not a fixed-duration timer.

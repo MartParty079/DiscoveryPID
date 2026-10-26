@@ -15,7 +15,7 @@ seeds = {
     {2.050, 2.300, .400},
     {2.560, .217, 2.610}
 };
-maxRuns = 27; // About 100 minutes at full setup/return/recovery limits; includes seeds and failures.
+maxRuns = 115; // About 100 minutes at full setup/return/recovery limits; includes seeds and failures.
 
 // --- Python trial bridge ---
 // Wrap an argument in double quotes to preserve paths containing spaces.
@@ -111,7 +111,7 @@ For Each({c}, {"KP", "KI", "KD"},
 Column(dt, "Settling Time s") << Set Property("Response Limits", {
     Lower(.6, 1),
     Middle(1, .8),
-    Upper(180, .001),
+    Upper(20, .001),
     Goal(Minimize),
     Importance(10)
 });
@@ -186,6 +186,10 @@ For(iter = 1, iter <= maxRuns - N Items(seeds), iter++,
     Column(dt, "Run")[n] = n;
     Column(dt, "Iteration")[n] = iter;
 
+    // Break the For loop is Reason Added is "Repicate Best Training Run"
+    If(Column(dt, "Reason Added") == "Replicate Best Training Run",
+        Break();
+    );
     // Store both measured responses for the next optimization iteration.
     r = run(p, i, d);
     If(r[3] != "measured",
