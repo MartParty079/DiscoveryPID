@@ -1,135 +1,84 @@
-# DiscoveryPID
+# DiscoveryPID barebones
 
-Arduino Mega 2560 position-control testbed with JMP Bayesian PID optimization.
+Branch: `barebones-pid-jsl-bayesopt`.
 
-## Latest supported code
+Only three active files matter:
 
-The repository default branch, `main`, is the current supported **Direct PID / 300-degree Bayesian study**.
+- `src/main.cpp` — 100 Hz pure positional PID firmware.
+- `tools/run_position_trial.py` — serial bridge that returns only settling time and overshoot.
+- `jmp/DiscoveryPID_Position_V2.jsl` — JMP Bayesian Optimization over Kp, Ki, Kd in 0–3.
 
-- firmware: `DiscoveryPID direct-position-pid-v3.4-300deg-10xrange 2026-08-18`
-- default/latest branch: `main`
-- test displacement: **300 deg**
-- Kp search: **0.5 to 1000**
-- Ki search: **0 to 500**
-- Kd search: **0 to 200**
-- maximum scored settling time: **3.0 s**
+Each JSL run creates a new experiment folder under `data/logs`, named
+`DiscoveryPID_YYYYMMDD_HHMMSS` using the PC's local experiment-start time.
+All seed and optimization trials from that run save their CSVs in that folder,
+with filenames `DiscoveryPID_YYYYMMDD_HHMMSS.csv` using each trial's start time.
+Numeric suffixes prevent collisions for both folders and files. JSL prints the
+experiment folder path in its log. Direct Python trial invocations without the
+optional experiment-directory argument continue saving directly in `data/logs`.
+Each CSV includes all received Arduino serial lines: startup messages,
+acknowledgments, positioning, the measured return, and Home recovery.
+Each row includes the PC receive timestamp,
+elapsed seconds, tested KP/KI/KD, and the full raw serial line. CSV quoting keeps
+commas in Arduino messages inside the raw-line cell. Rows are flushed as they
+arrive, and any final partial line is saved on exit. The worker still prints only
+`settling_time,overshoot` to stdout for valid measurements. Invalid trials print
+`ERROR,status`, which JSL records in a separate Failed Trials table before
+continuing the experiment. Failed trials are excluded from optimization. Each CSV also has a
+matching `.json` summary containing status, diagnostic detail, setup duration,
+return duration, and measured results (null for invalid trials).
 
-The scored return controller is a single standard position PID that outputs PWM directly:
+Setup has its own 12-second limit to receive `RETURN`; the return then gets its
+full 20-second window, independent of time spent positioning. A return that does
+not settle scores 20 seconds. A setup timeout, incompatible firmware, or lost
+return telemetry is an invalid trial, not a 20-second settling measurement.
+If return telemetry cannot complete the measurement, a PC watchdog ends the
+wait after 21 seconds from receipt of `RETURN` (one second of serial grace).
+Home recovery retains its separate 20-second limit.
+Setup accepts position within +/-3 degrees of 300 degrees, with speed at most
+12 degrees/second continuously for 850 ms. The wider setup tolerance does not
+change the return-settling tolerance.
 
-```text
-position error -> Kp + Ki + Kd -> PWM -> DRV8871 -> motor
-```
+The 115-trial budget counts attempted trials, including failures. JSL attempts
+all seed trials even if earlier ones fail, then uses remaining attempts to
+replenish seed measurements until four valid measurements are available before
+requesting optimization candidates. If no valid trials can be collected, it
+finishes with a failure report rather than throwing a trial-timeout error.
+Results and failures are saved as `results.jmp` and `failed_trials.jmp` in the
+experiment folder. This allows continuation after failed trials; it does not
+fix the underlying setup or Home recovery behavior.
 
-There is no inner speed PI in the scored return path.
+Upload the updated firmware before using this worker. Serial data now contains
+`D,time_ms,mode,position_deg,error_deg,encoder_count,pwm,relative_count,p_term,i_term,d_term,pid_raw`.
+The `relative_count` field is exactly `encoder_count - home`; the original absolute-count
+field is preserved. Python tests the relative count for settling: within +/-75
+counts and unchanged for five consecutive comparisons. This widens the band while retaining the
+unchanged-count stationarity rule and corrected Home reference.
 
-## Recommended terminal launcher
+The appended diagnostic fields contain signed P, I, and D contributions in PWM
+units and their sum (`pid_raw`) before output saturation, rounding, or the PWM
+minimum. The I field reflects the accepted integral state after anti-windup.
+The existing `pwm` field remains the actual signed output applied to the driver.
+All fields are captured in each CSV's Raw Serial Line; the earlier field
+positions remain unchanged for compatibility with the Python worker.
 
-The easiest way to use the project is now:
+The candidate controller is `u = Kp*error + Ki*integral - Kd*position_velocity`, PWM limited to ±225. Every nonzero command has a minimum PWM magnitude of 37, preserving direction; zero still stops the motor. This minimum applies to trial, setup, and recovery motion. The serial `pwm` field reports the actual signed PWM applied after rounding and limits. The fixed 300° setup and recovery controller is PID 1.35/0.4/0.1. Overshoot never ends a run; it is measured up to 300°. A return ends when it is stationary within ±75 encoder counts for five 100 Hz samples or at the 20 s cutoff.
 
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-.\DiscoveryPID.ps1
-```
+Before flashing/resetting, put the arm physically at Home. Each trial re-zeros at Home after the previous fixed-PID recovery.
 
-The interactive menu can:
+The fixed setup/recovery PID uses conditional-integration anti-windup: it rejects
+an integral update if the proposed output exceeds the PWM cap and that update
+would push farther into saturation. Updates that unwind the integral remain
+allowed. Candidate return PID integration, gains, minimum PWM, and acceptance
+tolerances are unchanged for this experiment.
 
-- switch/update to the latest supported code
-- switch between code versions / Git branches
-- switch or add GitHub forks/remotes
-- choose and remember the serial port
-- build + upload firmware
-- force fresh homing/calibration
-- launch JMP
-- run the small smoke test
-- run the full 300-degree physical control test
-- show firmware, branch, fork, port, and Git status
+Build/flash with PlatformIO, then open `jmp/DiscoveryPID_Position_V2.jsl` in JMP. Edit the three path/port lines at the top only if your local paths change.
 
-Pressing **Enter** at the main menu selects **Use latest code**. It does not move the motor.
+The JSON field final_counts_from_home is the signed relative encoder count in
+the last return-test sample, before Home recovery. It is null if no return
+sample was received. The settling band is inclusive (+/-75 counts, about
++/-2.54 degrees), still requiring five consecutive unchanged-count comparisons.
 
-Direct commands are also available:
-
-```powershell
-.\DiscoveryPID.ps1 latest
-.\DiscoveryPID.ps1 build
-.\DiscoveryPID.ps1 home
-.\DiscoveryPID.ps1 jmp
-.\DiscoveryPID.ps1 smoke
-.\DiscoveryPID.ps1 control
-.\DiscoveryPID.ps1 branch
-.\DiscoveryPID.ps1 fork
-.\DiscoveryPID.ps1 status
-```
-
-For the full workflow:
-
-```powershell
-.\DiscoveryPID.ps1 full
-```
-
-That performs:
-
-```text
-latest code -> build/upload -> home -> launch JMP
-```
-
-Local choices such as active fork and COM port are stored under `.git` and are not committed, so collaborators can use different machines without editing tracked files.
-
-## Settling-time definition
-
-The optimization metric intentionally excludes displacement time.
-
-```text
-move to 300 deg
-settle/dwell at displacement
-EVENT TEST_RETURN       <- timer starts
-candidate PID returns
-enter +/-2 encoder counts of home
-                         <- timer stops
-3.0 s without entering home window
-                         <- trial errors, gets a penalty, then study continues
-```
-
-If a trial does not produce a valid return measurement, JMP shows a warning, saves a finite penalty row, and continues. Invalid rows cannot become the best setup PID.
-
-## Current experiment defaults
-
-- return PWM ceiling: **225**
-- minimum nonzero drive PWM: **60**
-- home window: **+/-2 encoder counts**
-- prep timeout: **45 s**
-- maximum scored settling time: **3.0 s**
-- firmware return/recovery timeout: **45 s**
-- Python overall timeout: **60 s**
-
-The initial displacement uses the best valid completed PID from the current JMP session. Run 1 falls back to its current candidate PID.
-
-## Hardware
-
-- Arduino Mega 2560
-- Adafruit 4416 geared DC motor with quadrature encoder
-- DRV8871 motor driver
-- encoder A/B: pins 2/3
-- motor IN1/IN2: pins 9/10
-- serial: 115200 baud
-- default port: COM7
-
-The firmware counts all valid A/B transitions (x4 decoding), so the internal encoder scale is 56 transitions per motor revolution.
-
-## Repository layout
-
-- `DiscoveryPID.ps1` - interactive project launcher and direct CLI commands
-- `config/discoverypid.json` - tracked latest-code/default profile metadata
-- `src/main.cpp` - firmware
-- `tools/run_position_trial.py` - one physical JMP trial + scoring
-- `tools/home_position.py` - forced fresh homing/calibration
-- `jmp/DiscoveryPID_Position_V2.jsl` - current Bayesian study template
-- `scripts/position_v2/` - low-level build/home/test/JMP helpers
-- `docs/position_hold/README.md` - protocol and control details
-
-## Collaboration
-
-Use `DiscoveryPID.ps1` for normal work. The launcher refuses code-version switching when the working tree has uncommitted changes and uses fast-forward-only pulls, reducing accidental merge damage.
-
-Use **Switch code version / branch** to move between code lines and **Switch/add GitHub fork / remote** to collaborate from another fork. Machine-specific checkout paths, COM ports, and active fork choices do not need to be committed.
-
-Generated study data is intentionally ignored by Git.
+The 115-attempt budget targets roughly 100 minutes when trials use their full
+12-second setup, 20-second return, and 20-second recovery windows, plus serial
+and JMP overhead. Early settling or failed setup can shorten the experiment;
+this run count is an estimate, not a fixed-duration timer.
