@@ -187,7 +187,7 @@ For(iter = 1, iter <= maxRuns - N Items(seeds), iter++,
     Column(dt, "Iteration")[n] = iter;
 
     // Break the For loop is Reason Added is "Repicate Best Training Run"
-    If(Column(dt, "Reason Added") == "Replicate Best Training Run",
+    If(Column(dt, "Reason Added")[n] == "Replicate Best Training Run",
         Break();
     );
     // Store both measured responses for the next optimization iteration.
